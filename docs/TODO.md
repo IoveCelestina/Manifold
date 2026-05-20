@@ -89,7 +89,7 @@
 - [ ] **DoD**：任意客户纠纷能拉出完整时间线
 
 ### 14. 滚动升级策略 ⏱ 0.5d
-- [ ] 固定 image tag（**别用 `latest`**）
+- [x] 固定 image tag（**别用 `latest`**） —— 已用 digest 钉死全部 4 个镜像
 - [ ] sub2api / CPA 升级步骤文档化
 - [ ] **DoD**：`docs/upgrade.md` 有可执行步骤
 

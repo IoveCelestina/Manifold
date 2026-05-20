@@ -15,8 +15,11 @@ name: manifold
 services:
 
   # ─── 数据层 ────────────────────────────────────────────────
+  # 镜像版本固定到 digest —— 升级流程：先在 staging 改 digest 跑通，再到 prod 改。
+  # 别用 :latest 或滚动的 :alpine，否则 docker compose up 可能拉到 breaking change 直接挂。
   postgres:
-    image: postgres:17-alpine
+    # postgres:17-alpine  (pulled 2026-05-20)
+    image: postgres@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
     container_name: manifold-postgres
     restart: unless-stopped
     environment:
@@ -35,7 +38,8 @@ services:
       retries: 10
 
   redis:
-    image: redis:8-alpine
+    # redis:8-alpine  (pulled 2026-05-20)
+    image: redis@sha256:d146f83b1e0f02fc27c26a50cee39338c736674c5959db84363e6ae3cd9e02d2
     container_name: manifold-redis
     restart: unless-stopped
     environment:
@@ -53,10 +57,10 @@ services:
 
   # ─── 前台网关：sub2api 官方镜像（LGPL 黑盒，绝不改源码） ──────
   sub2api:
-    image: weishaw/sub2api:latest
+    # sub2api 0.1.129 (commit 51f72186, built 2026-05-20)
+    image: weishaw/sub2api@sha256:97fe7910d109de7b663497413f875ba5ba56b1cbdef4c0561d44810a7447600f
     container_name: manifold-sub2api
     restart: unless-stopped
-    pull_policy: always
     depends_on:
       postgres:
         condition: service_healthy
@@ -112,10 +116,10 @@ services:
   # ─── 后端执行器：CPA × N，每订阅一个实例 ───────────────────
   # 复制 cpa-1 块改名 cpa-3 / cpa-4 ... 即可横向扩账号
   cpa-1:
-    image: eceasy/cli-proxy-api:latest
+    # CLIProxyAPI v7.1.18 (commit a726e37, built 2026-05-20)
+    image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-1
     restart: unless-stopped
-    pull_policy: always
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
@@ -127,10 +131,10 @@ services:
     # 不在 manifold-data 网络上 —— postgres/redis 无法横向访问 cpa-*
 
   cpa-2:
-    image: eceasy/cli-proxy-api:latest
+    # CLIProxyAPI v7.1.18 (commit a726e37, built 2026-05-20)
+    image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-2
     restart: unless-stopped
-    pull_policy: always
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
