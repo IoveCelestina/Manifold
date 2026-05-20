@@ -27,7 +27,7 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
-      - manifold
+      - manifold-data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
       interval: 10s
@@ -44,7 +44,7 @@ services:
     volumes:
       - ./data/redis:/data
     networks:
-      - manifold
+      - manifold-data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -101,7 +101,8 @@ services:
     volumes:
       - ./data/sub2api:/app/data
     networks:
-      - manifold
+      - manifold-data       # 用于触达 postgres / redis
+      - manifold-upstream   # 用于触达 cpa-*
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
@@ -122,8 +123,8 @@ services:
       - ./cpa-1/auths:/root/.cli-proxy-api
       - ./data/cpa-1-logs:/CLIProxyAPI/logs
     networks:
-      - manifold
-    # 仅 sub2api 通过内网 DNS 名 `cpa-1:8317` 访问，公网不可达
+      - manifold-upstream
+    # 不在 manifold-data 网络上 —— postgres/redis 无法横向访问 cpa-*
 
   cpa-2:
     image: eceasy/cli-proxy-api:latest
@@ -137,9 +138,15 @@ services:
       - ./cpa-2/auths:/root/.cli-proxy-api
       - ./data/cpa-2-logs:/CLIProxyAPI/logs
     networks:
-      - manifold
+      - manifold-upstream
 
 networks:
-  manifold:
-    name: manifold
+  # 数据层：postgres / redis / sub2api。internal=true 让数据库容器自己上不了外网
+  manifold-data:
+    name: manifold-data
+    driver: bridge
+    internal: true
+  # 上游层：sub2api ↔ cpa-*。cpa 需要联外网调厂商 API，因此不设 internal
+  manifold-upstream:
+    name: manifold-upstream
     driver: bridge
