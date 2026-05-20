@@ -1,0 +1,47 @@
+# 编译产物
+bin/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+vendor/
+.gocache/
+
+# Node
+node_modules/
+.pnpm-store/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 密钥与环境变量
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.token
+
+# 部署运行时持久化数据（postgres / redis / sub2api / cpa logs）
+deploy/data/
+
+# CPA 实例真实配置含内网秘钥，仅提交 *.example.yaml
+deploy/cpa-*/config.yaml
+
+# CPA OAuth token 是敏感凭据，绝不入库
+deploy/cpa-*/auths/*
+!deploy/cpa-*/auths/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,145 @@
+# Manifold deploy compose —— 把 sub2api + CPA 拼起来
+#
+# 设计原则：
+#   - sub2api 用官方镜像不动它源码（避免 LGPL 传染）
+#   - CPA × N 每订阅一个实例（MIT，可改），仅内网互通不暴露公网
+#   - 所有持久化数据集中在 ./data/ 下，便于备份和迁移
+#
+# 启动：
+#   cd deploy
+#   cp .env.example .env  &&  编辑 .env 设置 POSTGRES_PASSWORD / JWT_SECRET / TOTP_ENCRYPTION_KEY
+#   docker compose up -d
+
+name: manifold
+
+services:
+
+  # ─── 数据层 ────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: manifold-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sub2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sub2api}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - manifold
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: manifold-redis
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["redis-server", "--maxclients", "50000", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    networks:
+      - manifold
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── 前台网关：sub2api 官方镜像（LGPL 黑盒，绝不改源码） ──────
+  sub2api:
+    image: weishaw/sub2api:latest
+    container_name: manifold-sub2api
+    restart: unless-stopped
+    pull_policy: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      SERVER_MODE: release
+      TZ: ${TZ:-Asia/Shanghai}
+
+      # 数据库
+      POSTGRES_USER: ${POSTGRES_USER:-sub2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-sub2api}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_USER: ${POSTGRES_USER:-sub2api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_NAME: ${POSTGRES_DB:-sub2api}
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      # 鉴权固定值 —— 不设置则每次重启用户登录态/2FA 失效
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required, run scripts/init.ps1}"
+      TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required, run scripts/init.ps1}"
+
+      # 管理员账号
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@manifold.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+      # 日志
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      # 默认只监听本机，公网通过外层反向代理（Caddy/Nginx）转发
+      - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./data/sub2api:/app/data
+    networks:
+      - manifold
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ─── 后端执行器：CPA × N，每订阅一个实例 ───────────────────
+  # 复制 cpa-1 块改名 cpa-3 / cpa-4 ... 即可横向扩账号
+  cpa-1:
+    image: eceasy/cli-proxy-api:latest
+    container_name: manifold-cpa-1
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./cpa-1/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cpa-1/auths:/root/.cli-proxy-api
+      - ./data/cpa-1-logs:/CLIProxyAPI/logs
+    networks:
+      - manifold
+    # 仅 sub2api 通过内网 DNS 名 `cpa-1:8317` 访问，公网不可达
+
+  cpa-2:
+    image: eceasy/cli-proxy-api:latest
+    container_name: manifold-cpa-2
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./cpa-2/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cpa-2/auths:/root/.cli-proxy-api
+      - ./data/cpa-2-logs:/CLIProxyAPI/logs
+    networks:
+      - manifold
+
+networks:
+  manifold:
+    name: manifold
+    driver: bridge
