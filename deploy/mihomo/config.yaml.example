@@ -34,9 +34,14 @@ dns:
 proxy-providers:
   airport:
     type: http
-    url: "<YOUR_SUBSCRIPTION_URL>"     # ← 填你的机场订阅地址
+    url: "<YOUR_SUBSCRIPTION_URL>"     # ← 填你的机场订阅地址（URL 前后不能有空格）
     interval: 86400                    # 每 24h 拉一次节点列表
     path: ./providers/airport.yaml
+    # 大多数国内机场按 User-Agent 鉴别客户端，默认 mihomo UA 会被 403。
+    # 试过 clash.meta / clash-verge / Stash 都不行就换 ClashforWindows/0.20.39
+    header:
+      User-Agent:
+        - "clash.meta"
     health-check:
       enable: true
       url: https://www.gstatic.com/generate_204

@@ -171,7 +171,7 @@ services:
   # 切换节点 / 看实时状态：docker compose exec mihomo wget -qO- http://127.0.0.1:9090/proxies
   mihomo:
     # mihomo（Clash.Meta）—— 首次拉镜像后建议改成 sha256:... 锁版本
-    image: metacubex/mihomo:Meta
+    image: metacubex/mihomo:latest
     container_name: manifold-mihomo
     restart: unless-stopped
     environment:
