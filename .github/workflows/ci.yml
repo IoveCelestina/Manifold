@@ -1,0 +1,130 @@
+# Manifold CI
+#
+# 跑得快、爆得早。所有 job 都不依赖外部凭据，PR 就能跑。
+#
+# 触发：
+#   - push 到 main
+#   - 任何 PR
+#   - 手动 (workflow_dispatch)
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  # ─── compose 校验：发现错别字 / 网络拼写 / required var 漏配 ──────
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # compose.yml 里用了 ${VAR:?...} 几个必填变量；CI 用占位值满足校验
+      - name: 准备占位 .env
+        working-directory: deploy
+        run: |
+          cp .env.example .env
+          # 填上所有 ${VAR:?} 校验的必填项
+          sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci-fake-pg-password|' .env
+          sed -i 's|^JWT_SECRET=.*|JWT_SECRET=ci-fake-jwt-secret-32-bytes-XXXXXXX|' .env
+          sed -i 's|^TOTP_ENCRYPTION_KEY=.*|TOTP_ENCRYPTION_KEY=ci-fake-totp-key-32-bytes-XXXXXXXX|' .env
+
+      - name: docker compose config
+        working-directory: deploy
+        run: |
+          docker compose config --quiet
+          echo "✓ compose config 解析通过"
+
+      # 防止有人重新引入 :latest 或滚动 tag
+      - name: 钉死 digest 检查
+        working-directory: deploy
+        run: |
+          if grep -E '^\s*image:\s+[^@#]+:(latest|alpine|stable)\s*$' docker-compose.yml; then
+            echo "::error::发现非 digest 钉死的 image，请改成 image@sha256:..."
+            exit 1
+          fi
+          if ! grep -qE 'image:.*@sha256:' docker-compose.yml; then
+            echo "::error::docker-compose.yml 里看不到任何 @sha256: 钉死的镜像，怀疑被改坏"
+            exit 1
+          fi
+          echo "✓ 所有 image 都用 @sha256: 钉死"
+
+  # ─── Caddyfile 校验 ──────────────────────────────────────────────
+  caddy-validate:
+    name: caddy validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: caddy validate
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e DOMAIN= \
+            -e ACME_EMAIL=ci@example.com \
+            caddy:2-alpine \
+            caddy validate --config /etc/caddy/Caddyfile
+
+  # ─── shellcheck：catches quoting bugs / unset vars / portability ──
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 跑 shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        env:
+          # SC1091 = 引用了 sourced 文件 shellcheck 找不到，本仓库不 source 外部脚本
+          # SC2155 = 把 declare 和赋值放一行（风格，无害）
+          SHELLCHECK_OPTS: -e SC1091 -e SC2155
+        with:
+          scandir: scripts
+          severity: warning
+
+  # ─── PSScriptAnalyzer：pwsh 脚本静态分析 ─────────────────────────
+  pwsh-lint:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 PSScriptAnalyzer + 跑
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning,Error `
+              -ExcludeRule PSAvoidUsingWriteHost  # 我们的脚本就是给用户看输出的
+          $issues | Format-Table -AutoSize
+          if ($issues.Where({ $_.Severity -in 'Error','ParseError' })) {
+            Write-Host "::error::PSScriptAnalyzer 发现 Error 级问题"
+            exit 1
+          }
+          if ($issues) {
+            Write-Host "::warning::PSScriptAnalyzer 有 $($issues.Count) 个 Warning"
+          }
+
+  # ─── UTF-8 无 BOM 检查：脚本一律 UTF-8 无 BOM ──────────────────
+  no-bom:
+    name: no UTF-8 BOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 扫所有 .sh / .ps1
+        run: |
+          bad=0
+          while IFS= read -r -d '' f; do
+            # BOM = EF BB BF
+            if head -c 3 "$f" | od -An -tx1 | grep -q 'ef bb bf'; then
+              echo "::error file=$f::文件含 UTF-8 BOM，Manifold 约定脚本一律 UTF-8 无 BOM"
+              bad=1
+            fi
+          done < <(find scripts -type f \( -name '*.sh' -o -name '*.ps1' \) -print0)
+          [[ "$bad" -eq 0 ]] && echo "✓ 所有脚本均为 UTF-8 无 BOM"
+          exit $bad

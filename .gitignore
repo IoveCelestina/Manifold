@@ -32,8 +32,16 @@ yarn-error.log*
 # 部署运行时持久化数据（postgres / redis / sub2api / cpa logs）
 deploy/data/
 
+# 备份产物，绝不入库
+backups/
+*.tar.gz.gpg
+deploy/bootstrap.log
+
 # CPA 实例真实配置含内网秘钥，仅提交 *.example.yaml
 deploy/cpa-*/config.yaml
+
+# 品牌化配置可能含真实联系方式 / 域名，仅提交 branding.example.json
+deploy/branding.json
 
 # CPA OAuth token 是敏感凭据，绝不入库
 deploy/cpa-*/auths/*
@@ -45,3 +53,10 @@ deploy/cpa-*/auths/*
 *.swp
 .DS_Store
 Thumbs.db
+
+# 本机工具配置（不属于项目）
+.claude/
+
+# sub2api 第三方源码（22k+ 文件，且自带 .git），不入库
+# 我们只通过钉死 image digest 引用，不维护源码副本
+sub2api-src/

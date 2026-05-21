@@ -1,0 +1,45 @@
+# Manifold Caddy 反代配置
+#
+# 两挡模式由 .env 里的 DOMAIN 切换：
+#   DOMAIN=               → 站点变成 :80，纯 HTTP，直接拿 IP 访问；夜间联调 / 内测用
+#   DOMAIN=manifold.com   → 站点变成域名，Caddy 自动找 Let's Encrypt 签 HTTPS、80 跳 443
+#
+# 改完这个文件后：docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+# 不停服。Caddy 改 cert 也是热加载的。
+
+{
+	# ACME 联系邮箱：证书快过期时 Let's Encrypt 发通知到这里
+	# 留默认值也能跑（只是 LE 不知道往哪发提醒）
+	email {$ACME_EMAIL:Taohu0122@qq.com}
+
+	# admin 接口只在容器内 listen，防止误暴露
+	admin localhost:2019
+}
+
+{$DOMAIN::80} {
+	encode gzip zstd
+
+	# 关键：把真实 client IP 透给 sub2api，否则它看到的所有请求都来自 caddy 容器
+	# sub2api 的 rate-limit / 审计日志 / 风控全靠这几个 header
+	reverse_proxy sub2api:8080 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	header {
+		# HSTS：浏览器记住一年内只走 HTTPS。仅 HTTPS 模式下浏览器才认这个 header。
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    nosniff
+		X-Frame-Options           DENY
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		# 别告诉外面我们用啥服务器
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+		level  INFO
+	}
+}

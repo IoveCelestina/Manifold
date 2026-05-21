@@ -1,0 +1,28 @@
+{
+  "_README": [
+    "Manifold 品牌化模板。复制为 deploy/branding.json 后由 scripts/apply-branding.sh 应用。",
+    "site_*, contact_info, doc_url 等字段会原样 PUT 到 sub2api /api/v1/admin/settings。",
+    "home_content 默认留空，使用源码内置 Manifold 首页；只有需要完整自定义 HTML 或 iframe URL 时再填写。",
+    "agreements 数组：每条的 source_file 是相对仓库根目录的 markdown 路径，apply 脚本会把文件内容读入 content_md。",
+    "改完任何字段后重新跑 apply-branding.sh 即生效；不需要重启 sub2api。"
+  ],
+
+  "site_name": "Manifold",
+  "site_subtitle": "面向独立开发者的多模型 API 网关",
+  "site_logo": "/manifold.svg",
+
+  "doc_url": "/docs",
+  "contact_info": "support@yesterhaze.codes",
+
+  "home_content": "",
+
+  "login_agreement_enabled": true,
+  "login_agreement_mode": "modal",
+
+  "agreements": [
+    { "id": "terms",      "title": "服务条款", "source_file": "docs/legal/terms-of-service.md" },
+    { "id": "privacy",    "title": "隐私政策", "source_file": "docs/legal/privacy-policy.md" },
+    { "id": "disclaimer", "title": "免责声明", "source_file": "docs/legal/disclaimer.md" },
+    { "id": "refund",     "title": "退款政策", "source_file": "docs/legal/refund-policy.md" }
+  ]
+}

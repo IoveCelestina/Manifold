@@ -7,11 +7,12 @@
 ## 🔴 P0 — 致命阻塞，不补完不要给任何人（含朋友）
 
 ### 1. HTTPS + 域名 + Caddy 反向代理 ⏱ 1-2h
-- [ ] 买域名（Cloudflare 注册商 + DNS）
-- [ ] 服务器装 Caddy
-- [ ] 改 `deploy/docker-compose.yml` 让 sub2api 仅监听 internal 网络
-- [ ] 新增 Caddy 服务监听 80/443 转发到 sub2api
-- [ ] **DoD**：`curl https://你的域名/health` 返回 200，证书是 Let's Encrypt
+- [ ] 买域名（Cloudflare 注册商 + DNS）—— 待选型 / 待付费
+- [x] ~~服务器装 Caddy~~ —— Caddy 走 docker，由 compose 拉起
+- [x] 改 `deploy/docker-compose.yml`：sub2api 取消 publish host port，挪到 manifold-edge 内网
+- [x] 新增 Caddy 服务监听 80/443 转发到 sub2api（含 HTTP/3 QUIC）
+- [x] Caddyfile 支持 `DOMAIN=` 两挡模式：留空 = IP 直连 HTTP；填值 = 自动 LE 签证书 + 80 跳 443
+- [ ] **DoD**：填上 DOMAIN 后 `curl https://你的域名/health` 返回 200，证书是 Let's Encrypt
 
 ### 2. 服务器基础加固 ⏱ 30min
 - [ ] `ufw` 只开 22 / 80 / 443
@@ -21,16 +22,20 @@
 - [ ] **DoD**：`nmap -p- yourdomain.com` 只看到你开的端口
 
 ### 3. PostgreSQL 自动备份 ⏱ 1-2h
-- [ ] cron 每天 `pg_dump --format=custom` → gpg 加密 → 上传 S3/B2/OSS（**异地**）
-- [ ] 至少 7 天滚动 + 月度归档
-- [ ] **实测**一次从备份恢复到 staging
-- [ ] **DoD**：另一台机器上能用昨天的备份重建出能用的 sub2api
+- [x] `scripts/backup.sh` + `backup.ps1`：pg_dump custom + .env + cpa-*/config + cpa-*/auths + sub2api data → tar.gz → gpg → 可选 rclone 推异地
+- [x] `scripts/restore.sh` + `restore.ps1`：全新机器模式默认（`--force` 才覆盖），自动 pg_restore + 启栈
+- [x] 至少 7 天滚动 + 月度归档（脚本内置 `RETENTION_DAILY=7` / `RETENTION_MONTHLY=12`）
+- [x] **本机实测通过**：pg_dump 869 个 TOC 对象 + 真实 OAuth token + .env + api-keys.json 全部进包；解密 + `pg_restore -l` 能读全部 schema
+- [x] 完整运维文档 → 见 [docs/backup-restore.md](backup-restore.md)
+- [ ] **DoD（异地）**：服务器到位后配 rclone + GPG 公钥 + cron 03:00 跑，跑一次成功推到 B2/R2
+- [ ] **DoD（DR）**：另一台机器上能用昨天的备份重建出能用的 sub2api（每月演练一次）
 
 ### 4. 监控 + 告警 ⏱ 1-2h
-- [ ] Uptime Kuma 自托管 / BetterStack 免费层
-- [ ] 探针：HTTPS endpoint、postgres 健康、redis、每个 CPA 的 `/v1/models`
-- [ ] 告警渠道：邮箱 + Telegram bot
+- [x] Uptime Kuma 自托管（compose 里 `kuma` service，绑 127.0.0.1:3001 + SSH 隧道访问）
+- [x] 探针清单 + Telegram bot 配法 → 见 [docs/monitoring.md](monitoring.md)
+- [ ] 进 Kuma UI 实际加完 6 个探针 + Telegram + 邮件 SMTP
 - [ ] **DoD**：故意 stop 一个容器，5 分钟内收到告警
+- [ ] 加一条 BetterStack/UptimeRobot 免费层探 `/health` 防 Kuma 自己挂（盲区缓解）
 
 ### 5. OAuth 账号风险预案 ⏱ 视账号数
 - [ ] 至少 3 个独立 OAuth 订阅（不同邮箱、不同付款卡）
@@ -48,8 +53,8 @@
 - [ ] **DoD**：首次登录强制同意，存留记录
 
 ### 7. 密钥轮换路径 ⏱ 1h
-- [ ] 文档化 JWT_SECRET / TOTP_ENCRYPTION_KEY / POSTGRES_PASSWORD 怎么换不停服
-- [ ] **DoD**：`docs/runbook.md` 里有可执行步骤
+- [x] [docs/runbook.md](runbook.md) 覆盖 POSTGRES_PASSWORD / REDIS_PASSWORD / JWT_SECRET / TOTP_ENCRYPTION_KEY（⚠ 不可换）/ ADMIN_PASSWORD / CPA 内网秘钥 / GPG 备份密钥 / DOMAIN / 整套升级
+- [x] **DoD**：每条路径都有"影响范围 / 准备 / 步骤 / 验证 / 回滚"五段
 
 ---
 
@@ -89,9 +94,10 @@
 - [ ] **DoD**：任意客户纠纷能拉出完整时间线
 
 ### 14. 滚动升级策略 ⏱ 0.5d
-- [x] 固定 image tag（**别用 `latest`**） —— 已用 digest 钉死全部 4 个镜像
-- [ ] sub2api / CPA 升级步骤文档化
-- [ ] **DoD**：`docs/upgrade.md` 有可执行步骤
+- [x] 固定 image tag（**别用 `latest`**） —— 已用 digest 钉死全部 6 个镜像（sub2api / cpa / postgres / redis / caddy / kuma）
+- [x] sub2api / CPA / Caddy / Kuma / Redis minor / Postgres minor / **Postgres major** 升级步骤文档化 → 见 [docs/upgrade.md](upgrade.md)
+- [x] **DoD**：每个升级路径都有"影响范围 / 准备 / 步骤 / 验证 / 回滚"五段
+- [ ] **DoD（实操）**：服务器到位后跑一次真实小版本升级（如 sub2api patch 版）走完流程
 
 ---
 

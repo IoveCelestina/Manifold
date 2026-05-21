@@ -58,15 +58,13 @@ function Set-EnvValue {
     Set-Content -Path $Path -Value $output -Encoding utf8
 }
 
-# 1. 生成全部密钥
+# 1. 生成全部密钥（CPA 实例的秘钥延后在循环里生成 —— 数量按目录自动发现）
 $secrets = @{
     POSTGRES_PASSWORD     = New-HexSecret 24
     JWT_SECRET            = New-HexSecret 32
     TOTP_ENCRYPTION_KEY   = New-HexSecret 32
     REDIS_PASSWORD        = New-HexSecret 24
     ADMIN_PASSWORD        = New-HexSecret 12
-    CPA_1_INTERNAL_SECRET = New-HexSecret 32
-    CPA_2_INTERNAL_SECRET = New-HexSecret 32
 }
 
 # 2. 生成 deploy/.env
@@ -87,19 +85,24 @@ if (Confirm-Overwrite $envTarget) {
 }
 
 # 3. 生成每个 CPA 实例的 config.yaml
-foreach ($n in 1, 2) {
-    $tmpl   = Join-Path $DeployDir "cpa-$n\config.example.yaml"
-    $target = Join-Path $DeployDir "cpa-$n\config.yaml"
+# 自动发现 deploy/cpa-* 目录，加新实例不用改脚本
+$cpaSecrets = [ordered]@{}
+foreach ($dir in Get-ChildItem -Path $DeployDir -Directory -Filter 'cpa-*' | Sort-Object Name) {
+    $cpaName = $dir.Name             # e.g. cpa-1
+    $n       = $cpaName.Substring(4) # e.g. 1
+    $tmpl    = Join-Path $dir.FullName 'config.example.yaml'
+    $target  = Join-Path $dir.FullName 'config.yaml'
     if (-not (Test-Path $tmpl)) {
         Write-Warning "模板缺失，跳过：$tmpl"
         continue
     }
     if (Confirm-Overwrite $target) {
+        $secret  = New-HexSecret 32
         $content = Get-Content -Path $tmpl -Raw
-        $secret  = $secrets["CPA_${n}_INTERNAL_SECRET"]
         $content = $content.Replace("REPLACE_WITH_INTERNAL_SHARED_SECRET_$n", $secret)
         Set-Content -Path $target -Value $content -NoNewline -Encoding utf8
         Write-Host "[OK] $target"
+        $cpaSecrets[$cpaName] = $secret
     } else {
         Write-Host "[SKIP] $target"
     }
@@ -110,8 +113,9 @@ Write-Host ""
 Write-Host "=== 关键凭据（请妥善保存，下次脚本可能覆盖）===" -ForegroundColor Cyan
 Write-Host ("  Admin email           : " + (Select-String -Path $envTarget -Pattern '^ADMIN_EMAIL=').Line.Split('=', 2)[1])
 Write-Host ("  Admin password        : " + $secrets.ADMIN_PASSWORD)
-Write-Host ("  CPA-1 内网共享秘钥    : " + $secrets.CPA_1_INTERNAL_SECRET)
-Write-Host ("  CPA-2 内网共享秘钥    : " + $secrets.CPA_2_INTERNAL_SECRET)
+foreach ($name in $cpaSecrets.Keys) {
+    Write-Host ("  $name 内网共享秘钥    : " + $cpaSecrets[$name])
+}
 Write-Host ""
 Write-Host "下一步：" -ForegroundColor Yellow
 Write-Host "  cd deploy"

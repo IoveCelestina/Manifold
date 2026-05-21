@@ -99,19 +99,69 @@ services:
       # 日志
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-json}
-    ports:
-      # 默认只监听本机，公网通过外层反向代理（Caddy/Nginx）转发
-      - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+    # 不再 publish host port —— 全走内置 Caddy 反代（见下方 caddy service）。
+    # 如需临时本机调试 sub2api 后台，临时反注释下面这行：
+    #   ports: ["127.0.0.1:8080:8080"]
     volumes:
       - ./data/sub2api:/app/data
     networks:
       - manifold-data       # 用于触达 postgres / redis
       - manifold-upstream   # 用于触达 cpa-*
+      - manifold-edge       # 用于被 caddy 反代
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 5
+
+  # ─── 外层反向代理：Caddy（仅它对外暴露 80/443） ────────────
+  # 模式由 .env 里的 DOMAIN 切：
+  #   DOMAIN=空                → 只听 :80，IP 直连（联调/内测用，无 HTTPS）
+  #   DOMAIN=manifold.example  → 自动 Let's Encrypt 签证书 + 80 跳 443
+  # 改 Caddyfile 后不停服：docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+  caddy:
+    # caddy:2.11-alpine  (pulled 2026-05-20)
+    image: caddy@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    container_name: manifold-caddy
+    restart: unless-stopped
+    depends_on:
+      sub2api:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-Taohu0122@qq.com}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 QUIC
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data           # ACME 证书持久化（不丢就不会每次重启重签 → 触发 LE rate limit）
+      - ./data/caddy/config:/config
+    networks:
+      - manifold-edge
+
+  # ─── 监控：Uptime Kuma ─────────────────────────────────────
+  # 自托管探针 + 告警面板。访问方式（默认）：
+  #   本机：浏览器开 http://127.0.0.1:3001
+  #   远端：ssh -L 3001:127.0.0.1:3001 vps，然后本机浏览器开 http://127.0.0.1:3001
+  # 首次启动后必须立刻设管理员账号；具体配什么探针看 docs/monitoring.md
+  kuma:
+    # uptime-kuma 2.3.2  (pulled 2026-05-20)
+    image: louislam/uptime-kuma@sha256:9aeb4e51d038047f414309c77a1af553281ca535723cb88907d907269d0a908e
+    container_name: manifold-kuma
+    restart: unless-stopped
+    ports:
+      # 仅本机绑定 —— 远端用 SSH 隧道访问，UI 不需要也不应该公网暴露
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./data/uptime-kuma:/app/data
+    networks:
+      # 三个网络都接：data 跨 postgres/redis 探针，upstream 跨 cpa-* 探针 + Telegram 出网，edge 备用
+      - manifold-data
+      - manifold-upstream
+      - manifold-edge
 
   # ─── 后端执行器：CPA × N，每订阅一个实例 ───────────────────
   # 复制 cpa-1 块改名 cpa-3 / cpa-4 ... 即可横向扩账号
@@ -153,4 +203,8 @@ networks:
   # 上游层：sub2api ↔ cpa-*。cpa 需要联外网调厂商 API，因此不设 internal
   manifold-upstream:
     name: manifold-upstream
+    driver: bridge
+  # 边缘层：caddy ↔ sub2api。把外网入口和数据层隔开
+  manifold-edge:
+    name: manifold-edge
     driver: bridge
