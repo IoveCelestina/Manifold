@@ -163,6 +163,25 @@ services:
       - manifold-upstream
       - manifold-edge
 
+  # ─── 出网代理：mihomo（Clash.Meta） ────────────────────────
+  # 仅为 cpa-* 提供海外出网通道。OpenAI/Anthropic 按 IP 地理封禁，
+  # 香港/大陆/俄罗斯/伊朗等地区直接 403 unsupported_country_region_territory。
+  # 配置：deploy/mihomo/config.yaml（gitignored，含机场订阅 URL）
+  # 改配置后：docker compose restart mihomo
+  # 切换节点 / 看实时状态：docker compose exec mihomo wget -qO- http://127.0.0.1:9090/proxies
+  mihomo:
+    # mihomo（Clash.Meta）—— 首次拉镜像后建议改成 sha256:... 锁版本
+    image: metacubex/mihomo:Meta
+    container_name: manifold-mihomo
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./mihomo:/root/.config/mihomo
+    networks:
+      - manifold-upstream
+    # 不对外暴露端口 —— CPA 走容器内网 mihomo:7890 即可
+
   # ─── 后端执行器：CPA × N，每订阅一个实例 ───────────────────
   # 复制 cpa-1 块改名 cpa-3 / cpa-4 ... 即可横向扩账号
   cpa-1:
@@ -170,8 +189,14 @@ services:
     image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-1
     restart: unless-stopped
+    depends_on:
+      - mihomo
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      # 走 mihomo 出网，绕开 OpenAI / Anthropic 的地理封禁
+      HTTPS_PROXY: http://mihomo:7890
+      HTTP_PROXY:  http://mihomo:7890
+      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,mihomo,cpa-1,cpa-2
     volumes:
       - ./cpa-1/config.yaml:/CLIProxyAPI/config.yaml
       - ./cpa-1/auths:/root/.cli-proxy-api
@@ -185,8 +210,13 @@ services:
     image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-2
     restart: unless-stopped
+    depends_on:
+      - mihomo
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      HTTPS_PROXY: http://mihomo:7890
+      HTTP_PROXY:  http://mihomo:7890
+      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,mihomo,cpa-1,cpa-2
     volumes:
       - ./cpa-2/config.yaml:/CLIProxyAPI/config.yaml
       - ./cpa-2/auths:/root/.cli-proxy-api

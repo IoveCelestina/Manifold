@@ -47,6 +47,11 @@ deploy/branding.json
 deploy/cpa-*/auths/*
 !deploy/cpa-*/auths/.gitkeep
 
+# mihomo 实际配置含机场订阅 URL，仅提交 config.yaml.example
+deploy/mihomo/config.yaml
+deploy/mihomo/providers/
+deploy/mihomo/cache.db
+
 # IDE
 .idea/
 .vscode/

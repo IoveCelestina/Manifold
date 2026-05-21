@@ -1,0 +1,78 @@
+# mihomo（Clash.Meta）配置 —— 仅给 CPA 出网用，不是给本机科学上网
+#
+# 用法：
+#   1) cp config.yaml.example config.yaml
+#   2) 把 <YOUR_SUBSCRIPTION_URL> 换成你机场的订阅链接
+#   3) docker compose up -d mihomo  &&  docker compose restart cpa-1 cpa-2
+#
+# 排错：
+#   docker compose logs --tail=50 mihomo
+#   docker compose exec mihomo wget -qO- http://127.0.0.1:9090/proxies | head -100
+#   docker compose exec cpa-1 wget -qO- --tries=1 -T 5 https://api.openai.com/v1/models
+#     ↑ 401 = 通了（被 OpenAI 用 api key 校验拦在最后一步，但 IP 过了）
+#     ↑ 403 unsupported_country = 代理没走通，节点还是被识别为禁区
+#     ↑ 超时 / connection refused = mihomo 没起来或订阅没拉到节点
+
+mixed-port: 7890                       # HTTP + SOCKS5 二合一端口
+allow-lan: true                        # 允许容器内网其他容器（CPA）连入
+mode: rule
+log-level: info
+external-controller: 0.0.0.0:9090      # 控制 API，仅 docker 内网可达
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+  nameserver:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+
+proxy-providers:
+  airport:
+    type: http
+    url: "<YOUR_SUBSCRIPTION_URL>"     # ← 填你的机场订阅地址
+    interval: 86400                    # 每 24h 拉一次节点列表
+    path: ./providers/airport.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+proxy-groups:
+  # 自动从订阅里挑延迟最低的日本节点
+  - name: JP-AUTO
+    type: url-test
+    use:
+      - airport
+    filter: "(?i)(日本|JP|Japan|jp|tokyo|osaka|🇯🇵)"
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+
+  # 业务入口：默认走 JP-AUTO，节点抽风时可手动切换
+  - name: PROXY
+    type: select
+    proxies:
+      - JP-AUTO
+    use:
+      - airport
+
+rules:
+  # 三家 AI 提供商及其 OAuth/CDN 域名走代理
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,gstatic.com,PROXY
+  - DOMAIN-SUFFIX,gemini.google.com,PROXY
+  - DOMAIN-SUFFIX,generativelanguage.googleapis.com,PROXY
+  # 其它一律直连，省代理带宽
+  - MATCH,DIRECT
