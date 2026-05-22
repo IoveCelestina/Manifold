@@ -24,6 +24,7 @@
 - [CPA 内网共享秘钥轮换](#cpa-内网共享秘钥轮换)
 - [GPG 备份密钥轮换](#gpg-备份密钥轮换)
 - [ACME_EMAIL / DOMAIN 改动](#acme_email--domain-改动)
+- [出网代理（宿主机 clashctl）](#出网代理宿主机-clashctl)
 - [整套 compose 升级](#整套-compose-升级)
 
 ---
@@ -331,6 +332,126 @@ echo | openssl s_client -connect manifold.example.com:443 -servername manifold.e
 ```
 
 **回滚**：DOMAIN 清空，caddy 重启，退回 HTTP-only `:80` 模式。证书数据保留在 `data/caddy/data`，下次再改回 DOMAIN 立刻能用，不重新签。
+
+---
+
+## 出网代理（宿主机 clashctl）
+
+cpa-* 调 OpenAI / Anthropic / Gemini 必须走海外节点出网 —— 香港/大陆 IP 直连会
+`403 unsupported_country_region_territory`。代理**不在 compose 内**:由宿主机的
+clashctl（Clash/mihomo 内核）提供,cpa-* 通过 `host.docker.internal:7890` 连过去。
+
+> 这是「两步部署」的第一步 —— clash 没起来,`docker compose up` 起来的 cpa-* 出网全废。
+
+### 首次部署
+
+**影响范围**：纯新增,不影响已运行容器。
+
+**步骤**：
+
+```bash
+# 1) 用 clashctl 装 clash 内核 + 填机场订阅（按你的 clashctl 文档操作）
+
+# 2) 改 clash 配置,关键三项必须满足：
+#    mixed-port: 7890
+#    allow-lan: true              # 不开,容器经 host-gateway 连不进来
+#    bind-address: '*'            # 监听 0.0.0.0,只绑 127.0.0.1 容器够不到
+#    并保留 AI 域名走代理的规则（openai/anthropic/google* → PROXY,其余 DIRECT）
+
+# 3) 启动 clash
+clashctl start          # 具体命令以你装的 clashctl 为准
+
+# 4) 防火墙：放行 docker 子网,挡掉公网（关键,否则全网白嫖代理）
+ufw allow from 172.16.0.0/12 to any port 7890 proto tcp
+# 注意：绝不要 `ufw allow 7890` —— 那是对公网开放
+
+# 5) 让 cpa-* 重新加载（compose 已配好 host.docker.internal）
+cd deploy && docker compose up -d --force-recreate cpa-1 cpa-2
+```
+
+**验证**：
+
+```bash
+# 容器内能连到宿主机代理
+docker exec manifold-cpa-1 wget -qO- --tries=1 -T 5 https://api.openai.com/v1/models
+#   401 = 通了（IP 过了,卡在 api key 校验是正常的）
+#   403 unsupported_country = 节点还在禁区,换节点
+#   超时 / refused = clash 没起 / 没监听 0.0.0.0 / 防火墙挡了
+
+# 公网摸不到 7890（在另一台机器上跑,应当 fail）
+nc -vz <服务器IP> 7890     # 期望: connection refused / timed out
+```
+
+**回滚**：clash 出问题时 cpa-* 会出网失败但容器不挂。修好 clash 后无需动 compose,
+cpa-* 会自动重连;长时间修不好可临时 `docker compose stop cpa-1 cpa-2` 停掉避免刷错误日志。
+
+### 切节点 / 看状态
+
+clashctl 自带 TUI;或直接打 clash 的控制 API（external-controller,默认 9090）：
+
+```bash
+clashctl                                    # 进 TUI 面板切节点 / 看延迟
+# 或裸调 API（在宿主机上）：
+curl -s http://127.0.0.1:9090/proxies | jq .
+curl -s -X PUT http://127.0.0.1:9090/proxies/PROXY -d '{"name":"<节点名>"}'
+```
+
+> 本地 Windows 想用 clashctl 远程管:`ssh -L 9090:127.0.0.1:9090 vps`,再让本地 clashctl 指向 `127.0.0.1:9090`。
+
+### 换机场订阅
+
+改 clash 配置里的订阅 URL → `clashctl restart`（或在 TUI 里触发 provider 更新）。
+cpa-* 不用动 —— 它们只认 `host.docker.internal:7890`,代理后面换什么节点无感。
+
+---
+
+## 替换为 Manifold 重构版 sub2api
+
+**影响范围**：`manifold-sub2api` 重建并重启，Caddy 可能短暂返回 502；数据库不重建。
+
+**准备**
+
+```bash
+cd ~/manifold
+git status --short
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.manifold.yml config --quiet
+docker compose -f deploy/docker-compose.staging.yml config --quiet
+```
+
+**staging 预演**
+
+```bash
+cd ~/manifold/deploy
+docker compose -f docker-compose.staging.yml up -d --build
+curl -fsS http://127.0.0.1:18080/health
+curl -fsS http://127.0.0.1:18080/manifold.svg | head
+docker compose -f docker-compose.staging.yml down
+```
+
+**步骤**
+
+```bash
+cd ~/manifold/deploy
+docker compose -f docker-compose.yml -f docker-compose.manifold.yml build sub2api
+docker run --rm --entrypoint /app/sub2api manifold/sub2api:local -version
+docker compose -f docker-compose.yml -f docker-compose.manifold.yml up -d sub2api caddy
+bash ../scripts/apply-branding.sh
+```
+
+**验证**
+
+```bash
+curl -fsS http://127.0.0.1/health
+curl -fsS http://127.0.0.1/manifold.svg | head
+docker logs manifold-sub2api --tail 80
+```
+
+**回滚**
+
+```bash
+cd ~/manifold/deploy
+docker compose -f docker-compose.yml up -d sub2api caddy
+```
 
 ---
 

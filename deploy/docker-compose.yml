@@ -1,7 +1,7 @@
 # Manifold deploy compose —— 把 sub2api + CPA 拼起来
 #
 # 设计原则：
-#   - sub2api 用官方镜像不动它源码（避免 LGPL 传染）
+#   - sub2api 当前仍用固定 digest 镜像；源码级 Manifold 重构先在 sub2api-src 独立推进
 #   - CPA × N 每订阅一个实例（MIT，可改），仅内网互通不暴露公网
 #   - 所有持久化数据集中在 ./data/ 下，便于备份和迁移
 #
@@ -55,7 +55,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── 前台网关：sub2api 官方镜像（LGPL 黑盒，绝不改源码） ──────
+  # ─── 前台网关：sub2api（后续替换为 Manifold 重构镜像） ──────
   sub2api:
     # sub2api 0.1.129 (commit 51f72186, built 2026-05-20)
     image: weishaw/sub2api@sha256:97fe7910d109de7b663497413f875ba5ba56b1cbdef4c0561d44810a7447600f
@@ -128,7 +128,7 @@ services:
       sub2api:
         condition: service_healthy
     environment:
-      DOMAIN: ${DOMAIN:-}
+      DOMAIN: ${DOMAIN:-:80}
       ACME_EMAIL: ${ACME_EMAIL:-Taohu0122@qq.com}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
@@ -137,6 +137,7 @@ services:
       - "443:443/udp"   # HTTP/3 QUIC
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./brand:/srv/brand:ro             # 品牌静态资源兜底，如 /manifold.svg
       - ./data/caddy/data:/data           # ACME 证书持久化（不丢就不会每次重启重签 → 触发 LE rate limit）
       - ./data/caddy/config:/config
     networks:
@@ -163,24 +164,17 @@ services:
       - manifold-upstream
       - manifold-edge
 
-  # ─── 出网代理：mihomo（Clash.Meta） ────────────────────────
-  # 仅为 cpa-* 提供海外出网通道。OpenAI/Anthropic 按 IP 地理封禁，
-  # 香港/大陆/俄罗斯/伊朗等地区直接 403 unsupported_country_region_territory。
-  # 配置：deploy/mihomo/config.yaml（gitignored，含机场订阅 URL）
-  # 改配置后：docker compose restart mihomo
-  # 切换节点 / 看实时状态：docker compose exec mihomo wget -qO- http://127.0.0.1:9090/proxies
-  mihomo:
-    # mihomo（Clash.Meta）—— 首次拉镜像后建议改成 sha256:... 锁版本
-    image: metacubex/mihomo:latest
-    container_name: manifold-mihomo
-    restart: unless-stopped
-    environment:
-      TZ: ${TZ:-Asia/Shanghai}
-    volumes:
-      - ./mihomo:/root/.config/mihomo
-    networks:
-      - manifold-upstream
-    # 不对外暴露端口 —— CPA 走容器内网 mihomo:7890 即可
+  # ─── 出网代理 ──────────────────────────────────────────────
+  # 出网代理不在本 compose 内 —— 由宿主机的 clashctl（Clash/mihomo 内核）提供。
+  # OpenAI/Anthropic 按 IP 地理封禁，香港/大陆等地区直连会 403
+  # unsupported_country_region_territory，所以 cpa-* 必须走代理出网。
+  #
+  # 部署前置（两步部署的第一步）：
+  #   1) 在宿主机用 clashctl 装好 clash 内核，填机场订阅
+  #   2) clash 必须监听 0.0.0.0:7890 且 allow-lan: true（只绑 127.0.0.1
+  #      容器经 host-gateway 进不来）
+  #   3) 防火墙挡掉公网对 7890 的访问，只放行 docker 子网 172.16.0.0/12
+  # 详见 docs/runbook.md 的「出网代理」一节。
 
   # ─── 后端执行器：CPA × N，每订阅一个实例 ───────────────────
   # 复制 cpa-1 块改名 cpa-3 / cpa-4 ... 即可横向扩账号
@@ -189,14 +183,15 @@ services:
     image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-1
     restart: unless-stopped
-    depends_on:
-      - mihomo
+    # 出网代理由宿主机 clashctl 提供；host-gateway 让容器解析到宿主机 IP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      # 走 mihomo 出网，绕开 OpenAI / Anthropic 的地理封禁
-      HTTPS_PROXY: http://mihomo:7890
-      HTTP_PROXY:  http://mihomo:7890
-      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,mihomo,cpa-1,cpa-2
+      # 走宿主机 clash 出网，绕开 OpenAI / Anthropic 的地理封禁
+      HTTPS_PROXY: http://host.docker.internal:7890
+      HTTP_PROXY:  http://host.docker.internal:7890
+      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,cpa-1,cpa-2
     volumes:
       - ./cpa-1/config.yaml:/CLIProxyAPI/config.yaml
       - ./cpa-1/auths:/root/.cli-proxy-api
@@ -210,13 +205,14 @@ services:
     image: eceasy/cli-proxy-api@sha256:f335987b845c2e01fa27f2755f7f385f5114310282ab440793d8ecfd6de0de74
     container_name: manifold-cpa-2
     restart: unless-stopped
-    depends_on:
-      - mihomo
+    # 出网代理由宿主机 clashctl 提供；host-gateway 让容器解析到宿主机 IP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      HTTPS_PROXY: http://mihomo:7890
-      HTTP_PROXY:  http://mihomo:7890
-      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,mihomo,cpa-1,cpa-2
+      HTTPS_PROXY: http://host.docker.internal:7890
+      HTTP_PROXY:  http://host.docker.internal:7890
+      NO_PROXY:    localhost,127.0.0.1,postgres,redis,sub2api,cpa-1,cpa-2
     volumes:
       - ./cpa-2/config.yaml:/CLIProxyAPI/config.yaml
       - ./cpa-2/auths:/root/.cli-proxy-api

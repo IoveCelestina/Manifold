@@ -31,6 +31,7 @@ yarn-error.log*
 
 # 部署运行时持久化数据（postgres / redis / sub2api / cpa logs）
 deploy/data/
+deploy/data-staging/
 
 # 备份产物，绝不入库
 backups/
@@ -47,11 +48,6 @@ deploy/branding.json
 deploy/cpa-*/auths/*
 !deploy/cpa-*/auths/.gitkeep
 
-# mihomo 实际配置含机场订阅 URL，仅提交 config.yaml.example
-deploy/mihomo/config.yaml
-deploy/mihomo/providers/
-deploy/mihomo/cache.db
-
 # IDE
 .idea/
 .vscode/
@@ -62,6 +58,5 @@ Thumbs.db
 # 本机工具配置（不属于项目）
 .claude/
 
-# sub2api 第三方源码（22k+ 文件，且自带 .git），不入库
-# 我们只通过钉死 image digest 引用，不维护源码副本
+# sub2api 重构工作区（22k+ 文件，且自带 .git），先保持独立不入主仓
 sub2api-src/
