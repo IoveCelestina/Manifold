@@ -1,45 +1,60 @@
-# Manifold Caddy 反代配置
-#
-# 两挡模式由 .env 里的 DOMAIN 切换：
-#   DOMAIN=               → 站点变成 :80，纯 HTTP，直接拿 IP 访问；夜间联调 / 内测用
-#   DOMAIN=manifold.com   → 站点变成域名，Caddy 自动找 Let's Encrypt 签 HTTPS、80 跳 443
-#
-# 改完这个文件后：docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
-# 不停服。Caddy 改 cert 也是热加载的。
+# Manifold Caddy 反代配置（源站在 Cloudflare 之后）
+# 改完热加载: docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 
 {
-	# ACME 联系邮箱：证书快过期时 Let's Encrypt 发通知到这里
-	# 留默认值也能跑（只是 LE 不知道往哪发提醒）
 	email {$ACME_EMAIL:Taohu0122@qq.com}
-
-	# admin 接口只在容器内 listen，防止误暴露
 	admin localhost:2019
+
+	# 站点在 Cloudflare 后面: 信任 CF 网段, 从 CF-Connecting-IP 取真实客户端 IP
+	servers {
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		client_ip_headers Cf-Connecting-Ip
+	}
 }
 
-{$DOMAIN::80} {
+zstuacm.xyz, www.zstuacm.xyz {
 	encode gzip zstd
 
-	# 关键：把真实 client IP 透给 sub2api，否则它看到的所有请求都来自 caddy 容器
-	# sub2api 的 rate-limit / 审计日志 / 风控全靠这几个 header
 	reverse_proxy sub2api:8080 {
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
 		header_up X-Forwarded-Proto {scheme}
 	}
 
 	header {
-		# HSTS：浏览器记住一年内只走 HTTPS。仅 HTTPS 模式下浏览器才认这个 header。
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-		X-Content-Type-Options    nosniff
-		X-Frame-Options           DENY
-		Referrer-Policy           "strict-origin-when-cross-origin"
-		# 别告诉外面我们用啥服务器
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 	}
 
 	log {
 		output stdout
 		format json
-		level  INFO
+		level INFO
 	}
+}
+
+chat.zstuacm.xyz {
+    encode gzip zstd
+
+    reverse_proxy manifold-chat-demo:8787 {
+        header_up X-Real-IP {client_ip}
+        header_up X-Forwarded-For {client_ip}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    log {
+        output stdout
+        format json
+        level INFO
+    }
 }
