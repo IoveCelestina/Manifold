@@ -41,21 +41,7 @@ ssh -L 3001:127.0.0.1:3001 vps
 | sub2api-health | HTTP(s) | `http://sub2api:8080/health` | 60s | 主网关心跳，挂了 = 全员断服 |
 | postgres | TCP Port | `postgres` : `5432` | 60s | 数据库 socket 通不代表能查询，但够预警 |
 | redis | TCP Port | `redis` : `6379` | 60s | 同上 |
-| cpa-1-models | HTTP(s) | `http://cpa-1:8317/v1/models` | 120s | 加 Header `Authorization: Bearer <CPA_1 内网共享秘钥>` |
-| cpa-2-models | HTTP(s) | `http://cpa-2:8317/v1/models` | 120s | 同上，换 cpa-2 的秘钥 |
 | (公网入口) | HTTP(s) - Keyword | `https://你的域名/health` | 60s | 关键词 `"status":"ok"`；DOMAIN 模式下才加 |
-
-加 cpa-* 探针时勾上 "Ignore TLS Error"（容器名解析不走 TLS）。
-
-### CPA `/v1/models` 探针的 Authorization header 怎么填
-
-打开 Kuma 新建 monitor，选 HTTP(s)，URL 填 `http://cpa-1:8317/v1/models`。展开 **HTTP Options** → **Headers**，添加：
-
-```json
-{ "Authorization": "Bearer <CPA-1 内网共享秘钥>" }
-```
-
-秘钥从 `deploy/cpa-1/config.yaml` 的 `api-keys:` 那行 copy。
 
 ## Telegram 告警
 
@@ -119,9 +105,8 @@ cp deploy/data/uptime-kuma/kuma.db.bak deploy/data/uptime-kuma-config-$(date +%Y
 
 每月一次：
 
-- [ ] `docker stop manifold-cpa-1` —— 5 分钟内 Telegram 应该响
-- [ ] `docker start manifold-cpa-1` —— 恢复通知也要收到
-- [ ] 在 sub2api 后台把 cpa-1 的 admin token 故意填错 —— 看 sub2api-health 是否绿（应该绿，因为 health 不查 CPA）
+- [ ] `docker stop manifold-sub2api` —— 5 分钟内 Telegram 应该响
+- [ ] `docker start manifold-sub2api` —— 恢复通知也要收到
 - [ ] 把 Kuma 自己 stop —— 验证你**不会**收到通知（因为告警发不出来了）。**这是 Kuma 的固有盲区**。
 
 ## Kuma 的告警盲区

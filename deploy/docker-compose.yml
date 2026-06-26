@@ -1,8 +1,8 @@
-# Manifold deploy compose —— 把 sub2api + CPA 拼起来
+# Manifold deploy compose —— sub2api 网关 + chat-demo + 数据/监控/反代
 #
 # 设计原则：
-#   - sub2api 当前仍用固定 digest 镜像；源码级 Manifold 重构先在 sub2api-src 独立推进
-#   - CPA × N 每订阅一个实例（MIT，可改），仅内网互通不暴露公网
+#   - sub2api 用固定 digest 镜像（升级流程见 docs/upgrade.md）
+#   - chat-demo 从 ../chat-demo 本地构建（聊天 + 生图）
 #   - 所有持久化数据集中在 ./data/ 下，便于备份和迁移
 #
 # 启动：
@@ -111,7 +111,7 @@ services:
       - ./data/sub2api:/app/data
     networks:
       - manifold-data       # 用于触达 postgres / redis
-      - manifold-upstream   # 用于触达 cpa-*
+      - manifold-upstream   # 用于出网调厂商 API
       - manifold-edge       # 用于被 caddy 反代
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -164,22 +164,14 @@ services:
     volumes:
       - ./data/uptime-kuma:/app/data
     networks:
-      # 三个网络都接：data 跨 postgres/redis 探针，upstream 跨 cpa-* 探针 + Telegram 出网，edge 备用
+      # 三个网络都接：data 跨 postgres/redis 探针，upstream 走 Telegram 告警出网，edge 备用
       - manifold-data
       - manifold-upstream
       - manifold-edge
 
-  # ─── 出网代理 ──────────────────────────────────────────────
-  # 出网代理不在本 compose 内 —— 由宿主机的 clashctl（Clash/mihomo 内核）提供。
-  # OpenAI/Anthropic 按 IP 地理封禁，香港/大陆等地区直连会 403
-  # unsupported_country_region_territory，所以 cpa-* 必须走代理出网。
-  #
-  # 部署前置（两步部署的第一步）：
-  #   1) 在宿主机用 clashctl 装好 clash 内核，填机场订阅
-  #   2) clash 必须监听 0.0.0.0:7890 且 allow-lan: true（只绑 127.0.0.1
-  #      容器经 host-gateway 进不来）
-  #   3) 防火墙挡掉公网对 7890 的访问，只放行 docker 子网 172.16.0.0/12
-  # 详见 docs/runbook.md 的「出网代理」一节。
+  # ─── 出网 ──────────────────────────────────────────────────
+  # 本机可直连 OpenAI/Anthropic/Google，无需出网代理。
+  # sub2api 经 manifold-upstream 网络直接出网调厂商 API。
 
   # ─── chat-demo（从旧机迁移恢复，源码在 ../chat-demo） ──────────
   chat-demo:
@@ -208,7 +200,7 @@ networks:
     name: manifold-data
     driver: bridge
     internal: true
-  # 上游层：sub2api ↔ cpa-*。cpa 需要联外网调厂商 API，因此不设 internal
+  # 上游层：sub2api 出网调厂商 API，因此不设 internal
   manifold-upstream:
     name: manifold-upstream
     driver: bridge

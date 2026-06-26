@@ -1,10 +1,10 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Manifold 一键初始化：生成密钥并填充 deploy/.env 与 deploy/cpa-*/config.yaml。
+    Manifold 一键初始化：生成密钥并填充 deploy/.env。
 .DESCRIPTION
-    用密码学安全随机数生成 POSTGRES/JWT/TOTP/REDIS/ADMIN 密码以及每个 CPA
-    实例的内网共享秘钥。已存在的文件默认询问是否覆盖，加 -Force 跳过询问。
+    用密码学安全随机数生成 POSTGRES/JWT/TOTP/REDIS/ADMIN 密码。
+    已存在的文件默认询问是否覆盖，加 -Force 跳过询问。
 .EXAMPLE
     .\scripts\init.ps1
 .EXAMPLE
@@ -58,7 +58,7 @@ function Set-EnvValue {
     Set-Content -Path $Path -Value $output -Encoding utf8
 }
 
-# 1. 生成全部密钥（CPA 实例的秘钥延后在循环里生成 —— 数量按目录自动发现）
+# 1. 生成全部密钥
 $secrets = @{
     POSTGRES_PASSWORD     = New-HexSecret 24
     JWT_SECRET            = New-HexSecret 32
@@ -84,45 +84,14 @@ if (Confirm-Overwrite $envTarget) {
     Write-Host "[SKIP] $envTarget"
 }
 
-# 3. 生成每个 CPA 实例的 config.yaml
-# 自动发现 deploy/cpa-* 目录，加新实例不用改脚本
-$cpaSecrets = [ordered]@{}
-foreach ($dir in Get-ChildItem -Path $DeployDir -Directory -Filter 'cpa-*' | Sort-Object Name) {
-    $cpaName = $dir.Name             # e.g. cpa-1
-    $n       = $cpaName.Substring(4) # e.g. 1
-    $tmpl    = Join-Path $dir.FullName 'config.example.yaml'
-    $target  = Join-Path $dir.FullName 'config.yaml'
-    if (-not (Test-Path $tmpl)) {
-        Write-Warning "模板缺失，跳过：$tmpl"
-        continue
-    }
-    if (Confirm-Overwrite $target) {
-        $secret  = New-HexSecret 32
-        $content = Get-Content -Path $tmpl -Raw
-        $content = $content.Replace("REPLACE_WITH_INTERNAL_SHARED_SECRET_$n", $secret)
-        Set-Content -Path $target -Value $content -NoNewline -Encoding utf8
-        Write-Host "[OK] $target"
-        $cpaSecrets[$cpaName] = $secret
-    } else {
-        Write-Host "[SKIP] $target"
-    }
-}
-
-# 4. 打印关键凭据 —— 用户必须记下来
+# 3. 打印关键凭据 —— 用户必须记下来
 Write-Host ""
 Write-Host "=== 关键凭据（请妥善保存，下次脚本可能覆盖）===" -ForegroundColor Cyan
 Write-Host ("  Admin email           : " + (Select-String -Path $envTarget -Pattern '^ADMIN_EMAIL=').Line.Split('=', 2)[1])
 Write-Host ("  Admin password        : " + $secrets.ADMIN_PASSWORD)
-foreach ($name in $cpaSecrets.Keys) {
-    Write-Host ("  $name 内网共享秘钥    : " + $cpaSecrets[$name])
-}
 Write-Host ""
 Write-Host "下一步：" -ForegroundColor Yellow
 Write-Host "  cd deploy"
 Write-Host "  docker compose up -d"
 Write-Host "  # 等 sub2api 健康检查通过后浏览器开 http://127.0.0.1:8080 用上面 admin 账号登录"
-Write-Host "  docker compose exec cpa-1 ./CLIProxyAPI login --provider claude"
-Write-Host "  docker compose exec cpa-2 ./CLIProxyAPI login --provider claude"
-Write-Host "  # 然后在 sub2api 后台把 cpa-1:8317 / cpa-2:8317 添加为 OpenAI 兼容上游账号"
-Write-Host "  # 上游 API Key 分别填上面的两个 CPA 内网共享秘钥"
 Write-Host ""

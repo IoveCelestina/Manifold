@@ -8,12 +8,9 @@ DoD：**另一台机器上，能用昨天的备份重建出能用的 sub2api**�
 |---|---|---|
 | `postgres.dump` | sub2api 全库 | 全员数据没了 |
 | `configs/.env` | JWT/TOTP/postgres 密码 | 所有用户登录态 + 2FA 失效 |
-| `configs/cpa-*/config.yaml` | CPA 内网共享秘钥 | sub2api ↔ CPA 通信中断 |
-| `configs/cpa-*/auths/*.json` | OAuth token | 要重登 OAuth，**有封号风险** |
 | `data/sub2api/` | sub2api 自带数据 | 不确定，安全起见包进来 |
-| `data/api-keys.json` | setup-all 发的明文 key 缓存 | 用户的 key 还能用，只是脚本端看不见明文了 |
 
-**不备份**：`data/postgres/`（pg_dump 代替）、`data/redis/`（可重建）、`data/cpa-*-logs/`。
+**不备份**：`data/postgres/`（pg_dump 代替）、`data/redis/`（可重建）。
 
 ## 一次性准备
 
@@ -131,7 +128,7 @@ RCLONE_REMOTE=b2:manifold-backups ./scripts/restore.sh manifold-2026-05-20T03-00
 
 `restore.sh` / `restore.ps1` 会：
 1. 拉取 + 解密 + 解包
-2. 还原配置和 OAuth token
+2. 还原配置
 3. `docker compose up -d postgres`
 4. `pg_restore --clean --if-exists` 灌库
 5. `docker compose up -d` 起完整栈
@@ -160,4 +157,4 @@ backup 跑得通不代表能恢复。每月在干净环境实测一次：
 
 ## 密钥轮换
 
-完整可执行步骤见 [docs/runbook.md](runbook.md)，覆盖 POSTGRES_PASSWORD / REDIS_PASSWORD / JWT_SECRET / TOTP_ENCRYPTION_KEY（⚠ 不可换）/ ADMIN_PASSWORD / CPA 内网秘钥 / GPG 备份密钥。
+完整可执行步骤见 [docs/runbook.md](runbook.md)，覆盖 POSTGRES_PASSWORD / REDIS_PASSWORD / JWT_SECRET / TOTP_ENCRYPTION_KEY（⚠ 不可换）/ ADMIN_PASSWORD / GPG 备份密钥。

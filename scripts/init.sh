@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Manifold 一键初始化（bash 版，对应 init.ps1）
 #
-# 用密码学安全随机数生成所有密钥并填充 deploy/.env 与 deploy/cpa-*/config.yaml。
-# 不调任何 API，纯本地操作 —— 把 sub2api / CPA 起起来之前先跑这个。
+# 用密码学安全随机数生成所有密钥并填充 deploy/.env。
+# 不调任何 API，纯本地操作 —— 把 sub2api 起起来之前先跑这个。
 #
 # 用法：
 #   scripts/init.sh                # 已存在的目标文件会逐个询问
@@ -75,53 +75,16 @@ else
   echo "[SKIP] $ENV_TARGET"
 fi
 
-# ─── 3. 每个 CPA 实例的 config.yaml ─────────────────────────
-# 自动发现 deploy/cpa-* 目录，免得加新实例还得改脚本
-declare -a CPA_SECRETS_REPORT=()
-shopt -s nullglob
-for dir in "$DEPLOY_DIR"/cpa-*/; do
-  cpa_name="$(basename "$dir")"           # e.g. cpa-1
-  n="${cpa_name#cpa-}"                    # e.g. 1
-  tmpl="${dir}config.example.yaml"
-  target="${dir}config.yaml"
-
-  if [[ ! -f "$tmpl" ]]; then
-    echo "模板缺失，跳过: $tmpl" >&2
-    continue
-  fi
-
-  secret=$(hex 32)
-  placeholder="REPLACE_WITH_INTERNAL_SHARED_SECRET_${n}"
-
-  if confirm_overwrite "$target"; then
-    # 用 awk 做字面替换，避开 sed 对 & 等元字符的特殊处理
-    awk -v p="$placeholder" -v s="$secret" \
-        '{ gsub(p, s); print }' "$tmpl" > "$target"
-    echo "[OK] $target"
-    CPA_SECRETS_REPORT+=("  $cpa_name 内网共享秘钥    : $secret")
-  else
-    echo "[SKIP] $target"
-  fi
-done
-shopt -u nullglob
-
-# ─── 4. 打印关键凭据 ───────────────────────────────────────
+# ─── 3. 打印关键凭据 ───────────────────────────────────────
 admin_email=$(grep -E '^ADMIN_EMAIL=' "$ENV_TARGET" | head -n1 | cut -d= -f2-)
 
 echo ""
 echo "=== 关键凭据（请妥善保存，下次脚本可能覆盖）==="
 echo "  Admin email           : $admin_email"
 echo "  Admin password        : $ADMIN_PASSWORD"
-for line in "${CPA_SECRETS_REPORT[@]}"; do
-  echo "$line"
-done
 echo ""
 echo "下一步："
 echo "  cd deploy"
 echo "  docker compose up -d"
 echo "  # 等 sub2api 健康检查通过后浏览器开 http://127.0.0.1:8080 用上面 admin 账号登录"
-echo "  docker compose exec cpa-1 ./CLIProxyAPI login --provider claude"
-echo "  docker compose exec cpa-2 ./CLIProxyAPI login --provider claude"
-echo "  # 然后在 sub2api 后台把 cpa-1:8317 / cpa-2:8317 添加为 OpenAI 兼容上游账号"
-echo "  # 上游 API Key 分别填上面的两个 CPA 内网共享秘钥"
 echo ""

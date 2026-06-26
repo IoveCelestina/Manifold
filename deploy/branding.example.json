@@ -16,13 +16,8 @@
 
   "home_content": "",
 
-  "login_agreement_enabled": true,
+  "login_agreement_enabled": false,
   "login_agreement_mode": "modal",
 
-  "agreements": [
-    { "id": "terms",      "title": "服务条款", "source_file": "docs/legal/terms-of-service.md" },
-    { "id": "privacy",    "title": "隐私政策", "source_file": "docs/legal/privacy-policy.md" },
-    { "id": "disclaimer", "title": "免责声明", "source_file": "docs/legal/disclaimer.md" },
-    { "id": "refund",     "title": "退款政策", "source_file": "docs/legal/refund-policy.md" }
-  ]
+  "agreements": []
 }

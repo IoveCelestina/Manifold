@@ -147,44 +147,17 @@ try {
 
         Remove-Item -LiteralPath (Join-Path $DeployDir 'data')       -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $DeployDir '.env')                 -Force -ErrorAction SilentlyContinue
-        Get-ChildItem -Path $DeployDir -Directory -Filter 'cpa-*' | ForEach-Object {
-            $authsDir = Join-Path $_.FullName 'auths'
-            if (Test-Path $authsDir) {
-                Get-ChildItem -LiteralPath $authsDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
-            }
-            $cfg = Join-Path $_.FullName 'config.yaml'
-            if (Test-Path $cfg) { Remove-Item -LiteralPath $cfg -Force }
-        }
     }
 
     # ─── 5. 还原配置 ─────────────────────────────────────────────────
     Write-Log "还原配置文件..."
     Copy-Item -LiteralPath (Join-Path $stageDir 'configs\.env') -Destination (Join-Path $DeployDir '.env')
 
-    foreach ($cfgDir in Get-ChildItem -Path (Join-Path $stageDir 'configs') -Directory -Filter 'cpa-*' -ErrorAction SilentlyContinue) {
-        $dest = Join-Path $DeployDir $cfgDir.Name
-        New-Item -ItemType Directory -Path (Join-Path $dest 'auths') -Force | Out-Null
-        $cfg = Join-Path $cfgDir.FullName 'config.yaml'
-        if (Test-Path $cfg) { Copy-Item -LiteralPath $cfg -Destination (Join-Path $dest 'config.yaml') }
-        $authsSrc = Join-Path $cfgDir.FullName 'auths'
-        if (Test-Path $authsSrc) {
-            Get-ChildItem -LiteralPath $authsSrc -File | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dest 'auths' $_.Name)
-            }
-        }
-    }
-
     $stageSub2api = Join-Path $stageDir 'data\sub2api'
     if (Test-Path $stageSub2api) {
         New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
         Copy-Item -LiteralPath $stageSub2api -Destination (Join-Path $DeployDir 'data\sub2api') -Recurse
     }
-    $stageApiKeys = Join-Path $stageDir 'data\api-keys.json'
-    if (Test-Path $stageApiKeys) {
-        New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
-        Copy-Item -LiteralPath $stageApiKeys -Destination (Join-Path $DeployDir 'data\api-keys.json')
-    }
-
     # ─── 6. 起 postgres + pg_restore ─────────────────────────────────
     Write-Log "拉起 postgres..."
     Push-Location $DeployDir

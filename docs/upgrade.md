@@ -42,7 +42,6 @@ image: weishaw/sub2api@sha256:97fe7910d109de7b663497413f875ba5ba56b1cbdef4c0561d
 ## 索引
 
 - [sub2api 升级](#sub2api-升级)
-- [CPA (cli-proxy-api) 升级](#cpa-cli-proxy-api-升级)
 - [Caddy 升级](#caddy-升级)
 - [Uptime Kuma 升级](#uptime-kuma-升级)
 - [Redis minor 升级](#redis-minor-升级)
@@ -107,45 +106,6 @@ docker compose up -d --force-recreate sub2api
 ```
 
 ⚠️ migration 不可逆。如果新版做了破坏性 schema 改，回滚必须走备份恢复路径。
-
----
-
-## CPA (cli-proxy-api) 升级
-
-**影响范围**：单个 CPA 实例重启。sub2api 该实例对应账号短暂 5xx，但其它 CPA 继续工作（负载均衡分散）。
-
-**准备**：
-- 至少 2 个 CPA 实例都健康 —— 不然单点没有 fallback
-- 拿到新版 digest
-
-**步骤**：
-
-```bash
-# 一次升一个，不要批量
-$EDITOR deploy/docker-compose.yml   # 改 cpa-1 那行的 digest
-cd deploy && docker compose pull cpa-1
-docker compose up -d --force-recreate cpa-1
-
-# 等 5 分钟，确认 cpa-1 上游账号在 sub2api 后台没 5xx 飙升，再升 cpa-2
-docker compose up -d --force-recreate cpa-2
-```
-
-**验证**：
-
-```bash
-# 容器健康
-docker ps --filter "name=manifold-cpa-" --format "table {{.Names}}\t{{.Status}}"
-
-# CPA 直接探针（带内网共享秘钥）
-SECRET=$(grep -oE '"[0-9a-f]{32,}"' deploy/cpa-1/config.yaml | head -1 | tr -d '"')
-docker run --rm --network manifold-upstream curlimages/curl:8 \
-  -fsS -H "Authorization: Bearer $SECRET" \
-  http://cpa-1:8317/v1/models | head -5
-```
-
-**回滚**：和 sub2api 同款 git checkout + force-recreate，但 OAuth token 卷不动，回去就还能用。
-
-⚠️ 升级前**不要**删 `deploy/cpa-*/auths/`，token 丢了要重登 OAuth，**有封号风险**。
 
 ---
 

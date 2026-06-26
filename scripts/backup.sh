@@ -4,14 +4,11 @@
 # 备份内容：
 #   - postgres 全库 dump (custom format, 已压缩)
 #   - deploy/.env (含 JWT / TOTP 加密 key，丢了所有用户登录态失效)
-#   - deploy/cpa-*/config.yaml + auths/*.json (OAuth token，丢了要重新登录有封号风险)
 #   - deploy/data/sub2api/ (sub2api 自带数据目录)
-#   - deploy/data/api-keys.json (setup-all.ps1 发出的明文 key 缓存)
 #
 # 不备份：
 #   - data/postgres/ (用 pg_dump 代替，跨版本更稳)
 #   - data/redis/   (session/限流，可重建)
-#   - data/cpa-*-logs/ (日志，不要)
 #
 # 用法：
 #   GPG_RECIPIENT=you@example.com ./scripts/backup.sh
@@ -91,27 +88,10 @@ log "[2/4] 拷贝配置和 OAuth token..."
 mkdir -p "${STAGE_DIR}/configs"
 cp "${DEPLOY_DIR}/.env" "${STAGE_DIR}/configs/.env"
 
-# cpa-*/config.yaml + auths/
-for cpa_dir in "${DEPLOY_DIR}"/cpa-*; do
-  [[ -d "$cpa_dir" ]] || continue
-  name="$(basename "$cpa_dir")"
-  mkdir -p "${STAGE_DIR}/configs/${name}"
-  [[ -f "${cpa_dir}/config.yaml" ]] && cp "${cpa_dir}/config.yaml" "${STAGE_DIR}/configs/${name}/config.yaml"
-  if [[ -d "${cpa_dir}/auths" ]]; then
-    cp -r "${cpa_dir}/auths" "${STAGE_DIR}/configs/${name}/auths"
-  fi
-done
-
 # sub2api 自带数据目录
 if [[ -d "${DEPLOY_DIR}/data/sub2api" ]]; then
   mkdir -p "${STAGE_DIR}/data"
   cp -r "${DEPLOY_DIR}/data/sub2api" "${STAGE_DIR}/data/sub2api"
-fi
-
-# api-keys.json（setup-all.ps1 的明文 key 缓存）
-if [[ -f "${DEPLOY_DIR}/data/api-keys.json" ]]; then
-  mkdir -p "${STAGE_DIR}/data"
-  cp "${DEPLOY_DIR}/data/api-keys.json" "${STAGE_DIR}/data/api-keys.json"
 fi
 
 # 留个版本指纹方便排错

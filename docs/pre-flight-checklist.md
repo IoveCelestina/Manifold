@@ -11,8 +11,7 @@
 ### A.1 已完成 ✅
 
 - [x] 域名 `yesterhaze.codes` 已购
-- [x] `setup-all.sh`、`cpa-health-check.sh`、`apply-branding.sh` 已写并 WSL 测过
-- [x] 4 篇法律文档（`docs/legal/`）已起草
+- [x] `apply-branding.sh` 已写并 WSL 测过
 - [x] `branding.example.json` 模板已就绪
 - [x] 审计日志技术设计已完成
 
@@ -23,7 +22,7 @@
 ssh-keygen -t ed25519 -C "manifold-deploy" -f $env:USERPROFILE\.ssh\manifold_ed25519
 # 私钥放好；公钥稍后上服务器
 
-# 2. GPG 备份密钥对 —— 见 §F，5 分钟搞定，私钥**两份独立**收好
+# 2. GPG 备份密钥对 —— 见 §E，5 分钟搞定，私钥**两份独立**收好
 ```
 
 ### A.3 信息卡（贴这里以免忘）
@@ -125,7 +124,7 @@ docker ps   # 不报权限错就 OK
 ```bash
 cd ~/manifold
 bash scripts/init.sh
-# 打印的 admin password / CPA 内网秘钥 → 立刻抄到信息卡（这次不抄，下次重生成）
+# 打印的 admin password → 立刻抄到信息卡（这次不抄，下次重生成）
 ```
 
 ### C.2 编辑 .env
@@ -141,10 +140,10 @@ nano deploy/.env
 # 以后想自签 LE 证书（CF 切灰云 / 不走 CF）：把 DOMAIN 填上 yesterhaze.codes
 DOMAIN=
 ACME_EMAIL=Taohu0122@qq.com
-GPG_RECIPIENT=<§F 第 2 步算出的 fingerprint 或 email>
+GPG_RECIPIENT=<§E 第 2 步算出的 fingerprint 或 email>
 RCLONE_REMOTE=<空也行，先跳过，第 7 步再来加>
-TELEGRAM_BOT_TOKEN=<§G 第 1 步算出的 token，空则不告警>
-TELEGRAM_CHAT_ID=<§G 第 1 步算出的 chat id>
+TELEGRAM_BOT_TOKEN=<§F 第 1 步算出的 token，空则不告警>
+TELEGRAM_CHAT_ID=<§F 第 1 步算出的 chat id>
 ```
 
 `ADMIN_PASSWORD` 由 init.sh 自动生成，**不要手改**。
@@ -165,41 +164,17 @@ done
 docker ps --filter name=manifold
 ```
 
-5 个容器都应该是 `Up (healthy)` 或 `Up` 状态：`manifold-sub2api`、`postgres`、`redis`、`caddy`、`kuma`、`cpa-1`、`cpa-2`。
+6 个容器都应该是 `Up (healthy)` 或 `Up` 状态：`manifold-sub2api`、`manifold-chat-demo`、`manifold-postgres`、`manifold-redis`、`manifold-caddy`、`manifold-kuma`。
 
 ---
 
-## D. CPA OAuth 登录（**手动浏览器交互，无法自动**）
+## D. 应用配置
 
-每个 CPA 实例需要登录上游订阅。OAuth 必须人工浏览器登录：
+### D.1 sub2api 后台全配置
 
-```bash
-# Anthropic OAuth
-docker compose -f deploy/docker-compose.yml exec cpa-1 ./CLIProxyAPI -claude-login
-# 终端会打印一个 URL → 在本机浏览器打开 → Anthropic 登录 → 回调一段 code → 粘贴到 cpa-1 终端
-```
+在 sub2api 后台手动配置：登录 → 加余额 → 建 group → 添加上游 OAuth 账号 → 签发 API key。签发的 anthropic / openai key 明文抄下来发给内测朋友或登控制台再发。
 
-每个 CPA 至少登 anthropic 一次；可选 openai / gemini / antigravity。3 个 CPA 实例都做完后：
-
-```bash
-ls -1 deploy/cpa-*/auths/   # 应能看到 claude-*.json / codex-*.json
-```
-
-> ⚠️ OAuth token 文件 **绝不入 git**（.gitignore 已屏蔽），**必须备份**（备份脚本已包含）。
-
----
-
-## E. 一键应用配置
-
-### E.1 sub2api 后台全配置
-
-```bash
-bash scripts/setup-all.sh
-```
-
-输出会包含发出的 anthropic / openai API key 明文，**抄下来发给内测朋友**或登控制台再发。
-
-### E.2 品牌化 + 法律文档
+### D.2 品牌化
 
 ```bash
 cp deploy/branding.example.json deploy/branding.json
@@ -207,7 +182,7 @@ nano deploy/branding.json    # 按需调 site_name / home_content / contact_info
 bash scripts/apply-branding.sh
 ```
 
-### E.3 健康巡检 cron
+### D.3 备份 cron
 
 ```bash
 crontab -e
@@ -216,15 +191,14 @@ crontab -e
 加：
 
 ```cron
-*/5 * * * * cd /home/admin/manifold && bash scripts/cpa-health-check.sh >> /var/log/manifold-health.log 2>&1
 30 3  * * * cd /home/admin/manifold && bash scripts/backup.sh >> /var/log/manifold-backup.log 2>&1
 ```
 
 ---
 
-## F. GPG 密钥生成（备份必需）
+## E. GPG 密钥生成（备份必需）
 
-### F.1 在**本机**（不是服务器）生成
+### E.1 在**本机**（不是服务器）生成
 
 ```powershell
 winget install GnuPG.GnuPG   # 已装的跳过
@@ -240,7 +214,7 @@ gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key <FINGERPRIN
 
 验证 `gpg --list-keys` 输出里**必须有 `sub rsa4096 [E]` 这一行**，否则备份脚本加密会失败。
 
-### F.2 私钥安保（关键）
+### E.2 私钥安保（关键）
 
 ```powershell
 # 导出
@@ -254,7 +228,7 @@ gpg --export        --armor <FINGERPRINT> > $env:USERPROFILE\Documents\manifold-
   - **绝不上服务器**、**绝不入 git**
 - `manifold-backup-public.asc`：上服务器、可入 git（无所谓）。
 
-### F.3 服务器导入公钥
+### E.3 服务器导入公钥
 
 ```powershell
 scp $env:USERPROFILE\Documents\manifold-backup-public.asc manifold:~/
@@ -271,9 +245,9 @@ gpg --edit-key <FINGERPRINT>  # 提示符里输入：trust → 5 (ultimate) → 
 
 ---
 
-## G. Telegram bot（Kuma + cpa-health-check 共用）
+## F. Telegram bot（Kuma 告警共用）
 
-### G.1 创建 bot（5 分钟）
+### F.1 创建 bot（5 分钟）
 
 1. Telegram 找 [@BotFather](https://t.me/BotFather)
 2. 发 `/newbot` → 起名（如 Manifold Alerts）→ username 必须以 `bot` 结尾（如 `manifold_alert_bot`）
@@ -281,22 +255,22 @@ gpg --edit-key <FINGERPRINT>  # 提示符里输入：trust → 5 (ultimate) → 
 4. 找你的新 bot 发任何文字（如 `/start`）
 5. 浏览器开 `https://api.telegram.org/bot<TOKEN>/getUpdates` → 找 `"chat":{"id":数字,...}` → 这是 chat id
 
-### G.2 测试发送
+### F.2 测试发送
 
 ```bash
 curl -sS -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
   -d "chat_id=<CHAT_ID>" -d "text=Manifold test alert from $(hostname)"
 ```
 
-Telegram 收到了 → 把 token / chat id 填到 `deploy/.env`，重新 `bash scripts/cpa-health-check.sh` 验证告警能发。
+Telegram 收到了 → 把 token / chat id 填到 `deploy/.env`。
 
-### G.3 接到 Kuma
+### F.3 接到 Kuma
 
 详见 `docs/monitoring.md` 第 60-95 行。简言之：Kuma → Settings → Notifications → Telegram → 同样的 token + chat id。
 
 ---
 
-## H. Cloudflare HTTPS（Flexible 模式）
+## G. Cloudflare HTTPS（Flexible 模式）
 
 当前路线：**CF 橙云开着 + SSL/TLS 模式 Flexible** —— CF 边缘对用户 HTTPS，CF↔源站走明文 HTTP。源站不需要签证书，`.env` 的 `DOMAIN=` 留空让 Caddy 监听 :80 纯 HTTP。
 
@@ -304,17 +278,17 @@ Telegram 收到了 → 把 token / chat id 填到 `deploy/.env`，重新 `bash s
 用户 ──HTTPS──> CF 边缘（CF 自动 *.yesterhaze.codes 证书）──HTTP──> 39.104.59.160:80 ──> Caddy ──> sub2api
 ```
 
-### H.1 DNS 记录
+### G.1 DNS 记录
 
 A 记录 `yesterhaze.codes → 39.104.59.160`、**Proxy 橙云 ON**。已设。`www` 同步加一条同样设置（可选）。
 
-### H.2 SSL/TLS 模式必须设 Flexible
+### G.2 SSL/TLS 模式必须设 Flexible
 
 CF → `yesterhaze.codes` → SSL/TLS → Overview → 选 **Flexible**
 
 > 错设 Full / Full(strict) 会导致 502：因为源站没装证书，CF 试图 HTTPS 回源会失败。
 
-### H.3 验 HTTPS
+### G.3 验 HTTPS
 
 ```powershell
 curl -I https://yesterhaze.codes/health
@@ -328,7 +302,7 @@ curl -I http://39.104.59.160/health
 # 期望 HTTP/1.1 200，由 Caddy 直接服务
 ```
 
-### H.4 未来想升级到端到端 HTTPS
+### G.4 未来想升级到端到端 HTTPS
 
 当前模式的代价：**CF↔源站这段是明文**，能被路径上任何监听者看到。对朋友试用阶段够用；正式收费前建议升级：
 
@@ -342,7 +316,7 @@ curl -I http://39.104.59.160/health
 
 ---
 
-## I. P0 最终 DoD 验证
+## H. P0 最终 DoD 验证
 
 照 `docs/TODO.md` P0 部分逐条勾：
 
@@ -353,8 +327,6 @@ curl -I http://39.104.59.160/health
 [ ] DR 演练：另一台机器（或同台 ~/restore-test/）从今天备份能起出能用的栈
 [ ] Kuma 加完 6 个探针，Telegram 收到测试告警；故意 docker stop sub2api，5min 内告警到
 [ ] BetterStack/UptimeRobot 免费层探 /health 加上
-[ ] cpa-health-check.sh cron 跑 1 次后 state file 写入；故意改 STRIKES=1 + 把 cpa-2 设 schedulable:false，看到自动 inactive + Telegram
-[ ] 控制台首次登录强制弹 4 份法律文档同意
 [ ] runbook 里 8 条密钥轮换路径过一遍清单（不必都演练，但都通读一次确认无歧义）
 ```
 
@@ -362,7 +334,7 @@ curl -I http://39.104.59.160/health
 
 ---
 
-## J. 上线后的"低头看"
+## I. 上线后的"低头看"
 
 第一周每天早上 5 分钟：
 
@@ -387,15 +359,13 @@ ls -lh ~/manifold/backups/$(date -d yesterday +%F)*.tar.gz.gpg
 
 ---
 
-## K. 常见踩坑
+## J. 常见踩坑
 
 | 症状 | 原因 | 修 |
 |---|---|---|
 | `curl /health` 401 | 没经 caddy 直接打 sub2api，端口错 | 经域名打，或本机走 `127.0.0.1:8080` |
 | LE 签证一直失败 | CF 在橙云 | DNS only 重试 |
 | 备份成功但远端没传 | rclone 没 init / RCLONE_REMOTE 拼写错 | `rclone config` + `rclone ls <remote>` 验证 |
-| Kuma 探针 cpa-1 通不了 | header `Authorization` 没填 | 重看 monitoring.md 第 50 行 |
-| OAuth 登录浏览器跳回 localhost | CPA OAuth 默认 callback 是 127.0.0.1 | 本机起隧道 `ssh -L 8989:127.0.0.1:8989 manifold`，回调点到 localhost:8989 重试 |
 | docker compose 拉不到镜像 | digest 钉太死且镜像源被墙 | 服务器换上海 / 香港，或配 mirror |
 
 ---

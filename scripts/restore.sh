@@ -83,7 +83,7 @@ restore.sh 默认只在全新环境上运行。若确定要覆盖：
 
 或先手动清理：
   cd deploy && docker compose down -v
-  rm -rf data/ .env cpa-*/auths/* cpa-*/config.yaml
+  rm -rf data/ .env
 EOF
   exit 3
 fi
@@ -110,8 +110,6 @@ if [[ "$HAS_DATA" -eq 1 ]]; then
   log "停现有 compose 栈 (down -v 清旧卷)..."
   ( cd "$DEPLOY_DIR" && docker compose down -v )
   rm -rf "${DEPLOY_DIR}/data" \
-         "${DEPLOY_DIR}"/cpa-*/auths/* \
-         "${DEPLOY_DIR}"/cpa-*/config.yaml \
          "${DEPLOY_DIR}/.env"
 fi
 
@@ -119,23 +117,9 @@ fi
 log "还原配置文件..."
 cp "${STAGE_DIR}/configs/.env" "${DEPLOY_DIR}/.env"
 
-for cfg_dir in "${STAGE_DIR}/configs"/cpa-*; do
-  [[ -d "$cfg_dir" ]] || continue
-  name="$(basename "$cfg_dir")"
-  mkdir -p "${DEPLOY_DIR}/${name}/auths"
-  [[ -f "${cfg_dir}/config.yaml" ]] && cp "${cfg_dir}/config.yaml" "${DEPLOY_DIR}/${name}/config.yaml"
-  if [[ -d "${cfg_dir}/auths" ]]; then
-    cp -rT "${cfg_dir}/auths" "${DEPLOY_DIR}/${name}/auths"
-  fi
-done
-
 if [[ -d "${STAGE_DIR}/data/sub2api" ]]; then
   mkdir -p "${DEPLOY_DIR}/data"
   cp -r "${STAGE_DIR}/data/sub2api" "${DEPLOY_DIR}/data/sub2api"
-fi
-if [[ -f "${STAGE_DIR}/data/api-keys.json" ]]; then
-  mkdir -p "${DEPLOY_DIR}/data"
-  cp "${STAGE_DIR}/data/api-keys.json" "${DEPLOY_DIR}/data/api-keys.json"
 fi
 
 # ─── 6. 起 postgres + pg_restore ─────────────────────────────────────

@@ -7,7 +7,7 @@
 #
 # 工作流程：
 #   1. 读 deploy/branding.json（首次先 cp branding.example.json）
-#   2. 把每条 agreement.source_file（如 docs/legal/terms-of-service.md）读入 content_md
+#   2. 把每条 agreement.source_file（如 docs/terms.md）读入 content_md
 #   3. 登录 sub2api → PUT /api/v1/admin/settings 整体更新
 #   4. 打印差异摘要
 #

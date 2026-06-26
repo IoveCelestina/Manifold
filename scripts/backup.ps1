@@ -3,7 +3,7 @@
 .SYNOPSIS
     Manifold 全量备份脚本（PowerShell 7+ 版，与 backup.sh 等价）。
 .DESCRIPTION
-    打包内容：postgres custom dump + .env + cpa-*/config.yaml + cpa-*/auths/ + data/sub2api + data/api-keys.json
+    打包内容：postgres custom dump + .env + data/sub2api
     输出单个 .tar.gz.gpg 加密包，可选 rclone 推异地。
 .PARAMETER GpgRecipient
     必填，GPG 收件人。多个用逗号分隔。
@@ -117,28 +117,11 @@ try {
     New-Item -ItemType Directory -Path $cfgRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $DeployDir '.env') -Destination (Join-Path $cfgRoot '.env')
 
-    foreach ($cpa in Get-ChildItem -Path $DeployDir -Directory -Filter 'cpa-*') {
-        $dest = Join-Path $cfgRoot $cpa.Name
-        New-Item -ItemType Directory -Path $dest -Force | Out-Null
-        $cfg = Join-Path $cpa.FullName 'config.yaml'
-        if (Test-Path $cfg) { Copy-Item -LiteralPath $cfg -Destination (Join-Path $dest 'config.yaml') }
-        $authsSrc = Join-Path $cpa.FullName 'auths'
-        if (Test-Path $authsSrc) {
-            Copy-Item -LiteralPath $authsSrc -Destination (Join-Path $dest 'auths') -Recurse
-        }
-    }
-
     $sub2apiData = Join-Path $DeployDir 'data\sub2api'
     if (Test-Path $sub2apiData) {
         $dataDir = Join-Path $stageDir 'data'
         New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
         Copy-Item -LiteralPath $sub2apiData -Destination (Join-Path $dataDir 'sub2api') -Recurse
-    }
-    $apiKeys = Join-Path $DeployDir 'data\api-keys.json'
-    if (Test-Path $apiKeys) {
-        $dataDir = Join-Path $stageDir 'data'
-        if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }
-        Copy-Item -LiteralPath $apiKeys -Destination (Join-Path $dataDir 'api-keys.json')
     }
 
     $gitCommit = try { (git -C $RootDir rev-parse HEAD 2>$null).Trim() } catch { 'unknown' }
