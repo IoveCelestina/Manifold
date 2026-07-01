@@ -74,10 +74,9 @@ services:
       SERVER_PORT: "8080"
       SERVER_MODE: release
       TZ: ${TZ:-Asia/Shanghai}
-      HTTPS_PROXY: http://host.docker.internal:7890
-      HTTP_PROXY: http://host.docker.internal:7890
-      ALL_PROXY: socks5h://host.docker.internal:7890
-      NO_PROXY: localhost,127.0.0.1,postgres,redis,sub2api
+      # 出网：本机在洛杉矶，OpenAI/Anthropic/Google 均可直连，无需出网代理。
+      # （旧香港机曾在此设 host:7890 clash 代理；迁美后移除，避免连不存在的代理导致出网失败。
+      #  这样本 compose 不再依赖 docker-compose.override.yml 关代理，可直接部署。）
       # 数据库
       POSTGRES_USER: ${POSTGRES_USER:-sub2api}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
