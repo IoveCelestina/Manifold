@@ -1,6 +1,6 @@
 # 预飞行 Checklist
 
-> 从"服务器买好了"到"`curl https://yesterhaze.codes/health` 返回 200"的总指挥。
+> 从"服务器买好了"到"`curl https://zstuacm.xyz/health` 返回 200"的总指挥。
 > 按顺序执行；任何一步失败先排查再继续，不要跳。
 > 预估纯执行 30-45 分钟（不含等待证书签发的 2-3 分钟）。
 
@@ -10,7 +10,7 @@
 
 ### A.1 已完成 ✅
 
-- [x] 域名 `yesterhaze.codes` 已购
+- [x] 域名 `zstuacm.xyz` 已购
 - [x] `apply-branding.sh` 已写并 WSL 测过
 - [x] `branding.example.json` 模板已就绪
 - [x] 审计日志技术设计已完成
@@ -137,7 +137,7 @@ nano deploy/.env
 
 ```bash
 # 当前路线：CF Flexible 模式（CF 帮跑 HTTPS，源站 80 端口纯 HTTP）→ DOMAIN 留空
-# 以后想自签 LE 证书（CF 切灰云 / 不走 CF）：把 DOMAIN 填上 yesterhaze.codes
+# 以后想自签 LE 证书（CF 切灰云 / 不走 CF）：把 DOMAIN 填上 zstuacm.xyz
 DOMAIN=
 ACME_EMAIL=Taohu0122@qq.com
 GPG_RECIPIENT=<§E 第 2 步算出的 fingerprint 或 email>
@@ -204,7 +204,7 @@ crontab -e
 winget install GnuPG.GnuPG   # 已装的跳过
 
 # 主钥（默认是 [SC] 只能签名）
-gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key "manifold-backup@yesterhaze.codes" rsa4096 default 5y
+gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key "manifold-backup@zstuacm.xyz" rsa4096 default 5y
 
 gpg --list-keys              # 记下 fingerprint（40 位 hex）
 
@@ -275,30 +275,30 @@ Telegram 收到了 → 把 token / chat id 填到 `deploy/.env`。
 当前路线：**CF 橙云开着 + SSL/TLS 模式 Flexible** —— CF 边缘对用户 HTTPS，CF↔源站走明文 HTTP。源站不需要签证书，`.env` 的 `DOMAIN=` 留空让 Caddy 监听 :80 纯 HTTP。
 
 ```
-用户 ──HTTPS──> CF 边缘（CF 自动 *.yesterhaze.codes 证书）──HTTP──> 39.104.59.160:80 ──> Caddy ──> sub2api
+用户 ──HTTPS──> CF 边缘（CF 自动 *.zstuacm.xyz 证书）──HTTP──> 154.44.9.231:80 ──> Caddy ──> sub2api
 ```
 
 ### G.1 DNS 记录
 
-A 记录 `yesterhaze.codes → 39.104.59.160`、**Proxy 橙云 ON**。已设。`www` 同步加一条同样设置（可选）。
+A 记录 `zstuacm.xyz → 154.44.9.231`、**Proxy 橙云 ON**。已设。`www` 同步加一条同样设置（可选）。
 
 ### G.2 SSL/TLS 模式必须设 Flexible
 
-CF → `yesterhaze.codes` → SSL/TLS → Overview → 选 **Flexible**
+CF → `zstuacm.xyz` → SSL/TLS → Overview → 选 **Flexible**
 
 > 错设 Full / Full(strict) 会导致 502：因为源站没装证书，CF 试图 HTTPS 回源会失败。
 
 ### G.3 验 HTTPS
 
 ```powershell
-curl -I https://yesterhaze.codes/health
+curl -I https://zstuacm.xyz/health
 # 期望 HTTP/2 200；证书 issuer 是 Cloudflare（不是 Let's Encrypt）
 ```
 
 源站直接打也能通（明文 HTTP）：
 
 ```powershell
-curl -I http://39.104.59.160/health
+curl -I http://154.44.9.231/health
 # 期望 HTTP/1.1 200，由 Caddy 直接服务
 ```
 
@@ -309,7 +309,7 @@ curl -I http://39.104.59.160/health
 | 升级到 | 怎么做 |
 |---|---|
 | **CF Full(strict) + CF Origin 证书** | CF → SSL/TLS → Origin Server → 生成 15 年证书 → 下载 cert.pem + key.pem 到 `deploy/data/caddy-certs/` → Caddyfile 加 `tls /path/to/cert.pem /path/to/key.pem` → CF 模式切 Full(strict) |
-| **CF Full(strict) + 自签 LE** | CF 切灰云 → `.env` 填 `DOMAIN=yesterhaze.codes` → Caddy 自动 LE 签证 → 签下后切回橙云 + Full(strict) |
+| **CF Full(strict) + 自签 LE** | CF 切灰云 → `.env` 填 `DOMAIN=zstuacm.xyz` → Caddy 自动 LE 签证 → 签下后切回橙云 + Full(strict) |
 | **不走 CF** | CF 灰云（仅 DNS） → 同上 LE 自签流程 |
 
 任一升级路线都不动 Caddyfile 现有结构，看着选。
@@ -318,19 +318,17 @@ curl -I http://39.104.59.160/health
 
 ## H. P0 最终 DoD 验证
 
-照 `docs/TODO.md` P0 部分逐条勾：
+逐条勾：
 
 ```
-[ ] curl https://yesterhaze.codes/health = 200（CF Flexible：证书 issuer 是 Cloudflare）
-[ ] nmap -p- yesterhaze.codes 只看到 22000 / 80 / 443（其余 stealth）
+[ ] curl https://zstuacm.xyz/health = 200（CF Flexible：证书 issuer 是 Cloudflare）
+[ ] nmap -p- zstuacm.xyz 只看到 22000 / 80 / 443（其余 stealth）
 [ ] backup.sh 跑一次，远端 rclone 推到位
 [ ] DR 演练：另一台机器（或同台 ~/restore-test/）从今天备份能起出能用的栈
 [ ] Kuma 加完 6 个探针，Telegram 收到测试告警；故意 docker stop sub2api，5min 内告警到
 [ ] BetterStack/UptimeRobot 免费层探 /health 加上
 [ ] runbook 里 8 条密钥轮换路径过一遍清单（不必都演练，但都通读一次确认无歧义）
 ```
-
-每条勾完后改 TODO.md。
 
 ---
 
@@ -370,4 +368,4 @@ ls -lh ~/manifold/backups/$(date -d yesterday +%F)*.tar.gz.gpg
 
 ---
 
-> 真上线了 → 在 `docs/TODO.md` 把 P0 整段勾掉，进 P1 阶段。
+> 真上线了 → 本 checklist 走完即可，无需额外记录。

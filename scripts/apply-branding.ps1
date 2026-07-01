@@ -18,7 +18,7 @@
 .EXAMPLE
     .\scripts\apply-branding.ps1
 .EXAMPLE
-    .\scripts\apply-branding.ps1 -ApiBase https://yesterhaze.codes
+    .\scripts\apply-branding.ps1 -ApiBase https://zstuacm.xyz
 #>
 [CmdletBinding()]
 param(

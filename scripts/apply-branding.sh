@@ -14,7 +14,7 @@
 # 用法：
 #   ./scripts/apply-branding.sh                # 用 deploy/branding.json
 #   ./scripts/apply-branding.sh --dry-run      # 只算差异不 PUT
-#   API_BASE=https://yesterhaze.codes ./scripts/apply-branding.sh   # 生产
+#   API_BASE=https://zstuacm.xyz ./scripts/apply-branding.sh   # 生产
 #
 # 依赖：bash 4+、curl、jq、awk。
 

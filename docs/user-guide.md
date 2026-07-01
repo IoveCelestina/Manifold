@@ -1,13 +1,13 @@
 # Manifold 用户指南
 
 > 文档初稿，截图待服务器上线后补。
-> 例子里出现的域名 `yesterhaze.codes` 是我们的生产入口；若你看到 IP 地址说明在内测白名单期。
+> 例子里出现的域名 `zstuacm.xyz` 是我们的生产入口；若你看到 IP 地址说明在内测白名单期。
 
 ---
 
 ## 1. 注册账号
 
-1. 打开 https://yesterhaze.codes
+1. 打开 https://zstuacm.xyz
 2. 点 "注册" → 输入邮箱 + 设置密码
 3. 收邮箱验证邮件（看不到检查垃圾箱）→ 点链接激活
 4. 登录后系统会弹出 4 份法律文档（服务条款 / 隐私 / 免责 / 退款）
@@ -28,7 +28,7 @@
 3. 输入充值金额（最低 1 元 / 1 USD，最高 1000 元 / 100 USD）
 4. 完成支付 → 余额到账通常 < 1 分钟
 
-> ⚠ 退款规则见 [退款政策](legal/refund-policy.md)。**单次充值不要超过 1 个月预估消耗**。
+> ⚠ 退款规则见退款政策（文档待补）。**单次充值不要超过 1 个月预估消耗**。
 
 ---
 
@@ -58,7 +58,7 @@
 **curl**：
 
 ```bash
-curl https://yesterhaze.codes/v1/messages \
+curl https://zstuacm.xyz/v1/messages \
   -H "Authorization: Bearer sk-<你的-anthropic-key>" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
@@ -76,7 +76,7 @@ from anthropic import Anthropic
 
 client = Anthropic(
     api_key="sk-<你的-anthropic-key>",
-    base_url="https://yesterhaze.codes",
+    base_url="https://zstuacm.xyz",
 )
 resp = client.messages.create(
     model="claude-sonnet-4-5-20250929",
@@ -89,7 +89,7 @@ print(resp.content[0].text)
 **Claude Code**：
 
 ```bash
-export ANTHROPIC_BASE_URL=https://yesterhaze.codes
+export ANTHROPIC_BASE_URL=https://zstuacm.xyz
 export ANTHROPIC_API_KEY=sk-<你的-anthropic-key>
 claude
 ```
@@ -99,7 +99,7 @@ claude
 **curl**：
 
 ```bash
-curl https://yesterhaze.codes/v1/chat/completions \
+curl https://zstuacm.xyz/v1/chat/completions \
   -H "Authorization: Bearer sk-<你的-openai-key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -115,7 +115,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="sk-<你的-openai-key>",
-    base_url="https://yesterhaze.codes/v1",
+    base_url="https://zstuacm.xyz/v1",
 )
 resp = client.chat.completions.create(
     model="gpt-5.4-mini",
@@ -131,7 +131,7 @@ print(resp.choices[0].message.content)
 调用前可以打 `GET /v1/models`：
 
 ```bash
-curl https://yesterhaze.codes/v1/models -H "Authorization: Bearer sk-<key>"
+curl https://zstuacm.xyz/v1/models -H "Authorization: Bearer sk-<key>"
 ```
 
 ---
@@ -165,7 +165,7 @@ A: Manifold 把多家原厂（Anthropic / OpenAI / Google 等）的官方 API �
 
 ### Q: 我的请求内容会被保存吗？
 
-A: 我们**不持久化**请求体 / 响应体的明文。只记录元数据（时间、token 数、状态码）用于计费和故障排查。**但上游原厂会按其自身政策记录请求**（详见 [隐私政策](legal/privacy-policy.md) 第 4 节）。
+A: 我们**不持久化**请求体 / 响应体的明文。只记录元数据（时间、token 数、状态码）用于计费和故障排查。**但上游原厂会按其自身政策记录请求**（详见隐私政策第 4 节，文档待补）。
 
 ### Q: 一个 key 能调所有模型吗？
 
@@ -181,7 +181,7 @@ A: 模型可用性跟原厂。原厂宣布上线后，我们一般 1-3 天内开
 
 ### Q: 调用失败但我看到扣费了？
 
-A: 仅对**成功响应（HTTP 2xx）**收费。如确认 4xx/5xx 也扣了费，邮箱我们 `support@yesterhaze.codes` 附上请求 ID（响应头 `X-Request-Id`），3 个工作日内补回。
+A: 仅对**成功响应（HTTP 2xx）**收费。如确认 4xx/5xx 也扣了费，邮箱我们 `support@zstuacm.xyz` 附上请求 ID（响应头 `X-Request-Id`），3 个工作日内补回。
 
 ### Q: 能开发票吗？
 
@@ -189,20 +189,20 @@ A: 上线后可开。控制台 → "财务" → "开票"，电子普票，邮件
 
 ### Q: SLA 是多少？
 
-A: **没有 SLA**。本服务为 best-effort，不承诺任何可用性百分比。详见 [服务条款](legal/terms-of-service.md) 第 6 条与 [免责声明](legal/disclaimer.md) 第 5 条。
+A: **没有 SLA**。本服务为 best-effort，不承诺任何可用性百分比。详见服务条款第 6 条与免责声明第 5 条（文档待补）。
 
 ### Q: 我能用 Manifold 做生产业务吗？
 
-A: **强烈不建议把关键业务、SLA 承诺、合规合约绑在 Manifold 上**。我们的上游订阅依赖原厂的容忍度，原厂随时可能封停（详见 [免责声明](legal/disclaimer.md) 第 2 条）。生产业务请直接订阅原厂。
+A: **强烈不建议把关键业务、SLA 承诺、合规合约绑在 Manifold 上**。我们的上游订阅依赖原厂的容忍度，原厂随时可能封停（详见免责声明第 2 条，文档待补）。生产业务请直接订阅原厂。
 
 ### Q: 客服在哪？
 
-A: 邮箱 `support@yesterhaze.codes`，工作日 24 小时内回复。紧急故障可在 Telegram 群 `<待填：群链接>` 喊。
+A: 邮箱 `support@zstuacm.xyz`，工作日 24 小时内回复。紧急故障可在 Telegram 群 `<待填：群链接>` 喊。
 
 ---
 
 ## 7. 联系
 
-- 文档错误 / 改进建议：`<待填：docs@yesterhaze.codes>`
-- 支持：`<待填：support@yesterhaze.codes>`
-- 退款 / 争议：`<待填：dispute@yesterhaze.codes>`
+- 文档错误 / 改进建议：`<待填：docs@zstuacm.xyz>`
+- 支持：`<待填：support@zstuacm.xyz>`
+- 退款 / 争议：`<待填：dispute@zstuacm.xyz>`
