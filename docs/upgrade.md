@@ -28,7 +28,7 @@ docker inspect --format='{{index .RepoDigests 0}}' weishaw/sub2api:0.1.130
 把拿到的 `sha256:...` 字符串填进 compose.yml 对应行，比如：
 
 ```yaml
-image: weishaw/sub2api@sha256:97fe7910d109de7b663497413f875ba5ba56b1cbdef4c0561d44810a7447600f
+image: weishaw/sub2api@sha256:f242f8504c9cb3c89f2a9531b1491a83d9bc7f3648a649c2c3082820d40f64cd
 ```
 
 并把行上面注释里的 tag 和 `(pulled YYYY-MM-DD)` 一起更新。
