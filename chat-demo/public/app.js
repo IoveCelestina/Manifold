@@ -13,6 +13,16 @@ const LS_MODEL = 'mfchat_model';      // 仅保留模型偏好（非敏感）；
 
 const IMAGE_MODEL_PREFIX = 'gpt-image';
 const FALLBACK_IMAGE_MODEL = 'gpt-image-2';
+// 豆包生图模型（sub2api 的 /v1/models 不返回，登录态下前端手动挂；后端 apiImages 直连火山出图 + 扣费）
+const DOUBAO_IMAGE_MODELS = [
+  { id: 'doubao-seedream-5-0-260128', label: 'Seedream 5.0 lite' },
+  { id: 'doubao-seedream-4-5-251128', label: 'Seedream 4.5' },
+  { id: 'doubao-seedream-4-0-250828', label: 'Seedream 4.0' },
+];
+// 是否图片生成模型：gpt-image 系 或 豆包 seedream 系
+function isImageModelId(id) { const s = id || ''; return s.startsWith(IMAGE_MODEL_PREFIX) || s.startsWith('doubao-seedream'); }
+// 下拉 / 气泡里的友好名（豆包显示 Seedream x.x，其它用原始 id）
+function imageModelLabel(id) { const m = DOUBAO_IMAGE_MODELS.find((x) => x.id === id); return m ? m.label : id; }
 const MAX_ATTACH = 4;
 const ATTACH_MAX_EDGE = 1568;
 const FILE_MAX_BYTES = 1024 * 1024;   // 单个文本文件上限 1MB（防上下文撑爆）
@@ -605,6 +615,8 @@ async function loadModels() {
     if (res.ok) ids = (json.data || []).map((m) => m.id).filter(Boolean).sort();
   } catch { /* 拉不到就用兜底列表 */ }
   if (!ids.includes(FALLBACK_IMAGE_MODEL)) ids.push(FALLBACK_IMAGE_MODEL);
+  // 登录态（有 uid，可按账号扣费）才挂豆包生图模型；keyonly 无法扣费，不显示。
+  if (useServer()) for (const m of DOUBAO_IMAGE_MODELS) if (!ids.includes(m.id)) ids.push(m.id);
   state.models = ids;
 
   const saved = localStorage.getItem(LS_MODEL);
@@ -612,7 +624,7 @@ async function loadModels() {
   for (const id of ids) {
     const opt = document.createElement('option');
     opt.value = id;
-    opt.textContent = id.startsWith(IMAGE_MODEL_PREFIX) ? `${id} ✦图` : id;
+    opt.textContent = isImageModelId(id) ? `${imageModelLabel(id)} ✦图` : id;
     sel.appendChild(opt);
   }
   sel.value = saved && ids.includes(saved) ? saved : ids[0];
@@ -625,7 +637,7 @@ $('model-select').addEventListener('change', () => {
 });
 
 function currentModel() { return $('model-select').value; }
-function isImageMode() { return (currentModel() || '').startsWith(IMAGE_MODEL_PREFIX); }
+function isImageMode() { return isImageModelId(currentModel()); }
 
 function syncComposerMode() {
   const img = isImageMode();
@@ -655,14 +667,14 @@ function renderModelSheet() {
   list.innerHTML = '';
   for (const opt of sel.options) {
     const id = opt.value;
-    const isImg = id.startsWith(IMAGE_MODEL_PREFIX);
+    const isImg = isImageModelId(id);
     const btn = document.createElement('button');
     btn.className = 'sheet-mdl ' + (isImg ? 'is-image' : 'is-chat') + (id === cur ? ' sel' : '');
     btn.innerHTML =
       '<span class="sheet-mdl-dot"></span>' +
       '<span class="sheet-mdl-name"></span>' +
       '<span class="sheet-mdl-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>';
-    btn.querySelector('.sheet-mdl-name').textContent = id;
+    btn.querySelector('.sheet-mdl-name').textContent = imageModelLabel(id);
     btn.addEventListener('click', () => {
       if (sel.value !== id) {
         sel.value = id;

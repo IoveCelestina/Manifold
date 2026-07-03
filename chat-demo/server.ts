@@ -24,6 +24,12 @@ const crypto = require('node:crypto');
 
 const BASE: string = (process.env.SUB2API_BASE || 'https://zstuacm.xyz').replace(/\/+$/, '');
 const PORT = Number(process.env.PORT || 8787);
+
+// 豆包生图（chat-demo 直连火山方舟出图 + 计费回扣到用户的 sub2api 余额）
+const ARK_BASE: string = (process.env.ARK_BASE || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/+$/, '');
+const ARK_API_KEY: string = process.env.ARK_API_KEY || '';
+const SUB2API_ADMIN_KEY: string = process.env.SUB2API_ADMIN_KEY || '';
+const DOUBAO_PRICE_USD: number = Number(process.env.DOUBAO_PRICE_USD || 0.10);   // 每张扣多少 USD（先一口价）
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // 静态资源版本号 = app.js/style.css 内容哈希。部署后内容变 → index.html 引用的 ?v= 变 →
@@ -1036,6 +1042,28 @@ async function pumpImageUpstream(
   return { ok: true };
 }
 
+// ── 豆包生图（火山方舟直连 + sub2api 余额扣费）──────────────────────────
+const DOUBAO_MODEL_RE = /^doubao-seedream-/i;
+function isDoubaoModel(m: any): boolean { return typeof m === 'string' && DOUBAO_MODEL_RE.test(m); }
+// 前端尺寸档 → 火山 size：auto/空 → 交给火山默认（2K）；WxH 直接透传（seedream 支持自定义分辨率）。
+function mapDoubaoSize(size: any): string | null {
+  const s = String(size || '').trim();
+  if (!s || s === 'auto') return null;
+  return /^\d{3,4}x\d{3,4}$/.test(s) ? s : null;
+}
+// 调 sub2api 管理接口调整某用户余额（operation: subtract 扣 / add 退）。金额单位 USD。
+// x-api-key 仅用于鉴权（证明有权操作）；扣的是 URL 里 {uid} 那个用户，与 admin 自身余额无关。
+async function adjustUserBalance(uid: number, amountUsd: number, operation: 'subtract' | 'add', idemKey: string, notes: string): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/admin/users/${uid}/balance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': SUB2API_ADMIN_KEY, 'Idempotency-Key': idemKey },
+    body: JSON.stringify({ balance: amountUsd, operation, notes }),
+  });
+  let j: any = null;
+  try { j = await r.json(); } catch { /* 空 body */ }
+  if (!r.ok) throw new Error(j?.error?.message || j?.message || `余额接口 HTTP ${r.status}`);
+}
+
 // 生图：登录态落 user 消息 + 结果存 blob 落 kind=image，并走后台任务（脱离连接、可刷新重连）；
 // keyonly（无 uid）保持原直连代理（dataURL 参考图、不落库）。上游 generations/edits，流式绕 CF 100s。
 async function apiImages(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
@@ -1045,6 +1073,12 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   const { model, prompt, size, quality } = body;
   if (!prompt) { sendJson(res, 400, { error: { message: '缺少 prompt' } }); return; }
   const keyonly = session.uid === null;
+
+  // 豆包生图：直连火山、需登录（要按 uid 扣费）、需配置齐全。keyonly / 未配置直接挡回。
+  const doubao = isDoubaoModel(model);
+  let doubaoCharge: { idemKey: string } | null = null;
+  if (doubao && keyonly) { sendJson(res, 400, { error: { message: '豆包生图需登录账号后使用' } }); return; }
+  if (doubao && (!ARK_API_KEY || !SUB2API_ADMIN_KEY)) { sendJson(res, 500, { error: { message: '豆包生图未配置（缺 ARK_API_KEY / SUB2API_ADMIN_KEY）' } }); return; }
 
   // 登录态：并发护栏须在落 user 消息前。
   let key = '';
@@ -1062,6 +1096,19 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
       .filter(Boolean) as { buf: Buffer; mime: string }[];
   } else {
     const uid = session.uid;
+    // 豆包：先扣费闸门 —— 余额不足时 sub2api 直接拒绝（balance 不能为负），此时不落 user 消息、不出图。
+    if (doubao) {
+      const idemKey = 'dbimg_' + crypto.randomBytes(8).toString('hex');
+      try {
+        await adjustUserBalance(uid, DOUBAO_PRICE_USD, 'subtract', idemKey, `豆包生图 ${model}`);
+        doubaoCharge = { idemKey };
+      } catch (e: any) {
+        const msg = String(e?.message || '');
+        const insufficient = /negative|不足|insufficient/i.test(msg);
+        sendJson(res, insufficient ? 402 : 502, { error: { message: insufficient ? '余额不足，请充值后再试' : ('扣费失败：' + msg) } });
+        return;
+      }
+    }
     const refs: string[] = Array.isArray(body.refs) ? body.refs.filter((h: any) => typeof h === 'string' && HASH_RE.test(h)) : [];
     if (!db.getConvMeta(uid, convId)) db.createConv(uid, convId, String(prompt).slice(0, 24));
     const seq = db.nextSeq(convId, uid);
@@ -1079,6 +1126,16 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   const timeout = setTimeout(() => ctrl.abort(new Error('上游超时')), 10 * 60 * 1000);
 
   const doRequest = (stream: boolean): Promise<Response> => {
+    // 豆包：直连火山方舟（非流式、要 b64_json、关水印），不经 sub2api；忽略 quality / 参考图。
+    if (doubao) {
+      const payload: any = { model, prompt, response_format: 'b64_json', watermark: false };
+      const s = mapDoubaoSize(size); if (s) payload.size = s;
+      return fetch(ARK_BASE + '/images/generations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ARK_API_KEY}` },
+        body: JSON.stringify(payload), signal: ctrl.signal,
+      });
+    }
     if (refBlobs.length) {
       const fd = new FormData();
       fd.append('model', model); fd.append('prompt', prompt); fd.append('size', size); fd.append('n', '1');
@@ -1174,15 +1231,26 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   inflight.set(key, task);
   bindCancel(task, ctrl);
   taskAttach(task, res);
+  let imgOk = false;
   try {
     const r = await pumpImageUpstream(doRequest, parser, (b) => taskWrite(task, b));
     if (task.canceled) { /* 用户取消：不落半成品图、不报错 */ }
-    else if (r.ok) persistImage();
+    else if (r.ok) {
+      const got = parser.result();
+      if (got.b64 || got.url) { persistImage(); imgOk = true; }
+      else task.error = '生图未返回图片';
+    }
     else task.error = (r.text || `上游错误 ${r.status}`).slice(0, 2000);
   } catch (e: any) {
     if (!task.canceled) task.error = '生图失败: ' + e.message;
   } finally {
     clearTimeout(timeout);
+    // 豆包已扣费但没成功出图（失败 / 取消 / 空图）→ 原路退款，避免用户白付。
+    if (doubaoCharge && !imgOk) {
+      const dc = doubaoCharge;
+      adjustUserBalance(session.uid, DOUBAO_PRICE_USD, 'add', dc.idemKey + '_rf', `豆包生图失败退款 ${model}`)
+        .catch((e: any) => console.error(`[doubao] 退款失败 uid=${session.uid} idem=${dc.idemKey}: ${e.message}`));
+    }
     taskFinish(task);
   }
 }

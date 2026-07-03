@@ -182,6 +182,11 @@ services:
     stop_grace_period: 35s
     environment:
       SUB2API_BASE: http://manifold-sub2api:8080
+      # 豆包生图：chat-demo 直连火山方舟出图，计费回扣到用户的 sub2api 余额（见 server.ts apiImages）
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE: ${ARK_BASE:-https://ark.cn-beijing.volces.com/api/v3}
+      SUB2API_ADMIN_KEY: ${SUB2API_ADMIN_KEY:-}
+      DOUBAO_PRICE_USD: ${DOUBAO_PRICE_USD:-0.10}
       PORT: "8787"
       DB_PATH: /data/manifold.db
       NODE_OPTIONS: --no-warnings
