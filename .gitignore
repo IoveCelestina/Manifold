@@ -38,15 +38,8 @@ backups/
 *.tar.gz.gpg
 deploy/bootstrap.log
 
-# CPA 实例真实配置含内网秘钥，仅提交 *.example.yaml
-deploy/cpa-*/config.yaml
-
 # 品牌化配置可能含真实联系方式 / 域名，仅提交 branding.example.json
 deploy/branding.json
-
-# CPA OAuth token 是敏感凭据，绝不入库
-deploy/cpa-*/auths/*
-!deploy/cpa-*/auths/.gitkeep
 
 # IDE
 .idea/
