@@ -1045,11 +1045,40 @@ async function pumpImageUpstream(
 // ── 豆包生图（火山方舟直连 + sub2api 余额扣费）──────────────────────────
 const DOUBAO_MODEL_RE = /^doubao-seedream-/i;
 function isDoubaoModel(m: any): boolean { return typeof m === 'string' && DOUBAO_MODEL_RE.test(m); }
-// 前端尺寸档 → 火山 size：auto/空 → 交给火山默认（2K）；WxH 直接透传（seedream 支持自定义分辨率）。
-function mapDoubaoSize(size: any): string | null {
+
+// 各豆包模型的能力 + 单价（USD）。关键事实：火山按「模型 × 成功出图张数」计费，与分辨率无关，
+// 所以这里单价即每张价；¥官价数字直接当 $（4.0 ¥0.20→$0.20 / 5.0lite ¥0.22→$0.22 / 4.5 ¥0.25→$0.25），
+// 可用 env 覆盖。sizes/formats 用于「只给该模型支持的参数」（含后端兜底校验）。
+const DOUBAO_CAPS: Record<string, { sizes: string[]; formats: string[]; price: number }> = {
+  'doubao-seedream-5-0-260128': { sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'], price: Number(process.env.DOUBAO_PRICE_5_0_LITE || 0.22) },
+  'doubao-seedream-4-5-251128': { sizes: ['2K', '4K'],       formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_5 || 0.25) },
+  'doubao-seedream-4-0-250828': { sizes: ['1K', '2K', '4K'], formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_0 || 0.20) },
+};
+function doubaoPrice(model: string): number { return DOUBAO_CAPS[model]?.price ?? DOUBAO_PRICE_USD; }
+
+// 前端尺寸档 → 火山 size：接受 1K/2K/3K/4K（方式1，按模型校验，非法档退 2K/首档）或 WxH（方式2，像素透传）；
+// auto/空 → null（交火山默认 2K）。挡住「gpt 的 1024x1024 透传给 5.0lite/4.5 触发最小像素报错」这类问题。
+function mapDoubaoSize(size: any, model: string): string | null {
   const s = String(size || '').trim();
-  if (!s || s === 'auto') return null;
-  return /^\d{3,4}x\d{3,4}$/.test(s) ? s : null;
+  if (!s || s.toLowerCase() === 'auto') return null;
+  const caps = DOUBAO_CAPS[model];
+  const tok = s.toUpperCase();
+  if (/^[1-4]K$/.test(tok)) {
+    if (!caps || caps.sizes.includes(tok)) return tok;
+    return caps.sizes.includes('2K') ? '2K' : caps.sizes[0];
+  }
+  if (/^\d{3,4}x\d{3,4}$/i.test(s)) return s.toLowerCase();
+  return null;
+}
+
+// 豆包有效输出格式：5.0 lite 支持 png/jpeg（默认 png）；4.5/4.0 固定 jpeg。用于发火山 + 定持久化 mime。
+function doubaoFormat(reqFmt: any, model: string): string {
+  const caps = DOUBAO_CAPS[model];
+  if (caps && caps.formats.length > 1) {
+    const f = String(reqFmt || '').trim().toLowerCase();
+    return caps.formats.includes(f) ? f : caps.formats[0];
+  }
+  return caps ? caps.formats[0] : 'png';
 }
 // 调 sub2api 管理接口调整某用户余额（operation: subtract 扣 / add 退）。金额单位 USD。
 // x-api-key 仅用于鉴权（证明有权操作）；扣的是 URL 里 {uid} 那个用户，与 admin 自身余额无关。
@@ -1077,6 +1106,8 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   // 豆包生图：直连火山、需登录（要按 uid 扣费）、需配置齐全。keyonly / 未配置直接挡回。
   const doubao = isDoubaoModel(model);
   let doubaoCharge: { idemKey: string } | null = null;
+  // 豆包出图的有效文件格式（用于发火山 + 定持久化 mime）：5.0lite png/jpeg、4.5/4.0 jpeg。
+  const doubaoMime: string | null = doubao ? ('image/' + doubaoFormat(body.output_format, model)) : null;
   if (doubao && keyonly) { sendJson(res, 400, { error: { message: '豆包生图需登录账号后使用' } }); return; }
   if (doubao && (!ARK_API_KEY || !SUB2API_ADMIN_KEY)) { sendJson(res, 500, { error: { message: '豆包生图未配置（缺 ARK_API_KEY / SUB2API_ADMIN_KEY）' } }); return; }
 
@@ -1100,7 +1131,7 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     if (doubao) {
       const idemKey = 'dbimg_' + crypto.randomBytes(8).toString('hex');
       try {
-        await adjustUserBalance(uid, DOUBAO_PRICE_USD, 'subtract', idemKey, `豆包生图 ${model}`);
+        await adjustUserBalance(uid, doubaoPrice(model), 'subtract', idemKey, `豆包生图 ${model}`);
         doubaoCharge = { idemKey };
       } catch (e: any) {
         const msg = String(e?.message || '');
@@ -1129,7 +1160,9 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     // 豆包：直连火山方舟（非流式、要 b64_json、关水印），不经 sub2api；忽略 quality / 参考图。
     if (doubao) {
       const payload: any = { model, prompt, response_format: 'b64_json', watermark: false };
-      const s = mapDoubaoSize(size); if (s) payload.size = s;
+      const s = mapDoubaoSize(size, model); if (s) payload.size = s;
+      // 仅 5.0 lite 支持自定义输出格式（png/jpeg）；4.5/4.0 固定 jpeg，不发该字段（文档：不支持自定义）。
+      if (DOUBAO_CAPS[model] && DOUBAO_CAPS[model].formats.length > 1) payload.output_format = doubaoFormat(body.output_format, model);
       return fetch(ARK_BASE + '/images/generations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ARK_API_KEY}` },
@@ -1160,7 +1193,7 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     const uid = session.uid;
     const { b64, url, revised, mime } = parser.result();
     let imgBuf: Buffer | null = null, imgMime = mime;
-    if (b64) { imgBuf = Buffer.from(b64, 'base64'); }
+    if (b64) { imgBuf = Buffer.from(b64, 'base64'); if (doubaoMime) imgMime = doubaoMime; }
     else if (url && url.startsWith('data:')) {
       const ci = url.indexOf(','); const semi = url.indexOf(';');
       imgMime = (semi > 5 ? url.slice(5, semi) : mime); imgBuf = Buffer.from(url.slice(ci + 1), 'base64');
@@ -1248,7 +1281,7 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     // 豆包已扣费但没成功出图（失败 / 取消 / 空图）→ 原路退款，避免用户白付。
     if (doubaoCharge && !imgOk) {
       const dc = doubaoCharge;
-      adjustUserBalance(session.uid, DOUBAO_PRICE_USD, 'add', dc.idemKey + '_rf', `豆包生图失败退款 ${model}`)
+      adjustUserBalance(session.uid, doubaoPrice(model), 'add', dc.idemKey + '_rf', `豆包生图失败退款 ${model}`)
         .catch((e: any) => console.error(`[doubao] 退款失败 uid=${session.uid} idem=${dc.idemKey}: ${e.message}`));
     }
     taskFinish(task);

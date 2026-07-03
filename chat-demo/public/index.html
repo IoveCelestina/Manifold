@@ -158,12 +158,16 @@
             <option value="3840x2160">3840×2160</option>
             <option value="2160x3840">2160×3840</option>
           </select>
+          <!-- 宽高比：仅豆包模型出现；与分辨率档一起映射成精确像素（选项由 app.js 填充） -->
+          <select id="ratio-select" class="hidden" title="宽高比"></select>
           <select id="quality-select" title="质量档位：低档更快更省">
             <option value="auto">质量·auto</option>
             <option value="low">质量·低</option>
             <option value="medium">质量·中</option>
             <option value="high">质量·高</option>
           </select>
+          <!-- 输出格式：仅豆包模型出现（且只有 5.0 lite 可选 png/jpeg），选项由 app.js 按模型填充 -->
+          <select id="output-format-select" class="hidden" title="输出格式"></select>
         </div>
         <div class="composer-row">
           <button class="btn-icon" id="btn-attach" title="上传图片（识图）">

@@ -186,6 +186,10 @@ services:
       ARK_API_KEY: ${ARK_API_KEY:-}
       ARK_BASE: ${ARK_BASE:-https://ark.cn-beijing.volces.com/api/v3}
       SUB2API_ADMIN_KEY: ${SUB2API_ADMIN_KEY:-}
+      # 豆包每模型单价（USD/张；火山按模型×张数计费，与分辨率无关）。缺省即代码内置默认。
+      DOUBAO_PRICE_4_0: ${DOUBAO_PRICE_4_0:-0.20}
+      DOUBAO_PRICE_5_0_LITE: ${DOUBAO_PRICE_5_0_LITE:-0.22}
+      DOUBAO_PRICE_4_5: ${DOUBAO_PRICE_4_5:-0.25}
       DOUBAO_PRICE_USD: ${DOUBAO_PRICE_USD:-0.10}
       PORT: "8787"
       DB_PATH: /data/manifold.db

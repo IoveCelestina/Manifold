@@ -13,16 +13,34 @@ const LS_MODEL = 'mfchat_model';      // 仅保留模型偏好（非敏感）；
 
 const IMAGE_MODEL_PREFIX = 'gpt-image';
 const FALLBACK_IMAGE_MODEL = 'gpt-image-2';
-// 豆包生图模型（sub2api 的 /v1/models 不返回，登录态下前端手动挂；后端 apiImages 直连火山出图 + 扣费）
-const DOUBAO_IMAGE_MODELS = [
-  { id: 'doubao-seedream-5-0-260128', label: 'Seedream 5.0 lite' },
-  { id: 'doubao-seedream-4-5-251128', label: 'Seedream 4.5' },
-  { id: 'doubao-seedream-4-0-250828', label: 'Seedream 4.0' },
+// 豆包生图模型能力表（sub2api /v1/models 不返回，登录态前端手动挂；后端 apiImages 直连火山出图+扣费）。
+// 每个模型只暴露它支持的参数：分辨率档 sizes、输出格式 formats（仅 5.0 lite 可 png/jpeg，4.5/4.0 固定 jpeg）。
+// 计费在后端（按模型单价×出图张数），前端不涉及金额。
+const DOUBAO_CAPS = {
+  'doubao-seedream-5-0-260128': { label: 'Seedream 5.0 lite', sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'] },
+  'doubao-seedream-4-5-251128': { label: 'Seedream 4.5',      sizes: ['2K', '4K'],       formats: ['jpeg'] },
+  'doubao-seedream-4-0-250828': { label: 'Seedream 4.0',      sizes: ['1K', '2K', '4K'], formats: ['jpeg'] },
+};
+const DOUBAO_IMAGE_MODELS = Object.keys(DOUBAO_CAPS);
+// gpt-image 的尺寸档（豆包各用自己的 sizes；见 syncImagegenControls）
+const GPT_SIZES = [
+  { v: 'auto', t: 'auto' }, { v: '1024x1024', t: '1024×1024' }, { v: '1536x1024', t: '1536×1024' },
+  { v: '1024x1536', t: '1024×1536' }, { v: '2048x2048', t: '2048×2048' }, { v: '2048x1152', t: '2048×1152' },
+  { v: '3840x2160', t: '3840×2160' }, { v: '2160x3840', t: '2160×3840' },
 ];
+// 豆包：分辨率档 × 宽高比 → 精确像素（火山「方式2」，官方推荐宽高像素值表）。
+// 让用户直接选比例，不必在 prompt 里写「横版/竖屏」；档位由各模型 sizes 决定支持哪些。
+const DOUBAO_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9'];
+const DOUBAO_PIXELS = {
+  '1K': { '1:1': '1024x1024', '16:9': '1312x736', '9:16': '736x1312', '4:3': '1152x864', '3:4': '864x1152', '3:2': '1248x832', '2:3': '832x1248', '21:9': '1568x672' },
+  '2K': { '1:1': '2048x2048', '16:9': '2848x1600', '9:16': '1600x2848', '4:3': '2304x1728', '3:4': '1728x2304', '3:2': '2496x1664', '2:3': '1664x2496', '21:9': '3136x1344' },
+  '3K': { '1:1': '3072x3072', '16:9': '4096x2304', '9:16': '2304x4096', '4:3': '3456x2592', '3:4': '2592x3456', '3:2': '3744x2496', '2:3': '2496x3744', '21:9': '4704x2016' },
+  '4K': { '1:1': '4096x4096', '16:9': '5504x3040', '9:16': '3040x5504', '4:3': '4704x3520', '3:4': '3520x4704', '3:2': '4992x3328', '2:3': '3328x4992', '21:9': '6240x2656' },
+};
 // 是否图片生成模型：gpt-image 系 或 豆包 seedream 系
 function isImageModelId(id) { const s = id || ''; return s.startsWith(IMAGE_MODEL_PREFIX) || s.startsWith('doubao-seedream'); }
 // 下拉 / 气泡里的友好名（豆包显示 Seedream x.x，其它用原始 id）
-function imageModelLabel(id) { const m = DOUBAO_IMAGE_MODELS.find((x) => x.id === id); return m ? m.label : id; }
+function imageModelLabel(id) { return DOUBAO_CAPS[id]?.label || id; }
 const MAX_ATTACH = 4;
 const ATTACH_MAX_EDGE = 1568;
 const FILE_MAX_BYTES = 1024 * 1024;   // 单个文本文件上限 1MB（防上下文撑爆）
@@ -616,7 +634,7 @@ async function loadModels() {
   } catch { /* 拉不到就用兜底列表 */ }
   if (!ids.includes(FALLBACK_IMAGE_MODEL)) ids.push(FALLBACK_IMAGE_MODEL);
   // 登录态（有 uid，可按账号扣费）才挂豆包生图模型；keyonly 无法扣费，不显示。
-  if (useServer()) for (const m of DOUBAO_IMAGE_MODELS) if (!ids.includes(m.id)) ids.push(m.id);
+  if (useServer()) for (const id of DOUBAO_IMAGE_MODELS) if (!ids.includes(id)) ids.push(id);
   state.models = ids;
 
   const saved = localStorage.getItem(LS_MODEL);
@@ -648,7 +666,7 @@ function syncComposerMode() {
   $('composer-hint').textContent = img
     ? '生图模式 · 直接描述 = 文生图 · 附图 = 按参考图改图'
     : 'Enter 发送 · Shift+Enter 换行';
-  syncSizeOptions();
+  syncImagegenControls();   // 按当前模型出对分辨率/格式档、显隐 quality/输出格式
   syncModelPill();          // 移动端顶栏药丸跟随当前模型
 }
 
@@ -699,10 +717,55 @@ function closeModelSheet() {
 // 高分尺寸只有文生图 /generations 支持；改图 /edits 只认 auto 和三个原生预设。
 const NATIVE_SIZES = new Set(['auto', '1024x1024', '1536x1024', '1024x1536']);
 function syncSizeOptions() {
+  if (DOUBAO_CAPS[currentModel()]) return;   // 豆包用自己的分辨率档，不受 gpt /edits 尺寸限制
   const sel = $('size-select');
   const editMode = state.attachments.length > 0;
   for (const opt of sel.options) opt.disabled = editMode && !NATIVE_SIZES.has(opt.value);
   if (editMode && !NATIVE_SIZES.has(sel.value)) sel.value = '1024x1024';
+}
+
+// 用 items（[{v,t}]）重填一个 select，尽量保留原选择，否则用 defVal。
+function fillSelect(sel, items, defVal) {
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for (const it of items) {
+    const o = document.createElement('option');
+    o.value = it.v; o.textContent = it.t;
+    sel.appendChild(o);
+  }
+  sel.value = items.some((i) => i.v === prev) ? prev : defVal;
+}
+
+// 按当前模型让生图控件「只暴露该模型支持的参数」：
+//   豆包 → 分辨率用该模型档、隐藏 quality、输出格式仅 5.0 lite 可选(png/jpeg)；
+//   gpt-image → gpt 尺寸档 + quality、隐藏输出格式。
+function syncImagegenControls() {
+  if (!isImageMode()) return;
+  const model = currentModel();
+  const caps = DOUBAO_CAPS[model];
+  const sizeSel = $('size-select');
+  const qSel = $('quality-select');
+  const fSel = $('output-format-select');
+  const rSel = $('ratio-select');
+  if (caps) {
+    fillSelect(sizeSel, caps.sizes.map((s) => ({ v: s, t: s })), caps.sizes.includes('2K') ? '2K' : caps.sizes[0]);
+    fillSelect(rSel, DOUBAO_RATIOS.map((r) => ({ v: r, t: '比例·' + r })), '1:1');
+    rSel.classList.remove('hidden');
+    qSel.classList.add('hidden');
+    if (caps.formats.length > 1) {
+      fillSelect(fSel, caps.formats.map((f) => ({ v: f, t: '格式·' + f.toUpperCase() })), caps.formats[0]);
+      fSel.classList.remove('hidden');
+    } else {
+      fSel.classList.add('hidden');   // 4.5/4.0 固定 jpeg，无可选项
+    }
+  } else {
+    fillSelect(sizeSel, GPT_SIZES, '1024x1024');
+    rSel.classList.add('hidden');      // 宽高比仅豆包用（gpt 用具体像素档）
+    qSel.classList.remove('hidden');
+    fSel.classList.add('hidden');
+    syncSizeOptions();                 // gpt /edits 尺寸限制
+  }
 }
 
 /* ───────────────────────── 会话 ───────────────────────── */
@@ -1431,12 +1494,24 @@ async function sendImageGen(prompt) {
   const conv = currentConv() || newConv();
   await ensureMessages(conv);
   const model = currentModel();
+  const caps = DOUBAO_CAPS[model];
   let size = $('size-select').value;
+  let sizeLabel = size;
+  // 豆包：分辨率档 + 宽高比 → 精确像素（方式2）；查不到则退回只发档（方式1，比例靠 prompt）。
+  if (caps) {
+    const ratio = $('ratio-select').value || '1:1';
+    sizeLabel = `${size} · ${ratio}`;
+    const px = (DOUBAO_PIXELS[size] || {})[ratio];
+    if (px) size = px;
+  }
   const quality = $('quality-select').value;
+  // 输出格式：仅豆包 5.0 lite 有该控件（png/jpeg）；其余模型不传（后端按模型兜底）。
+  const outputFormat = caps && caps.formats.length > 1 ? $('output-format-select').value : undefined;
   const userMsg = pushUserMessage(conv, prompt);
   // 生图只取图片附件作参考图（文本文件忽略）；附了参考图 → 后端走 edits 改图。
-  const refImages = (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
-  if (refImages.length && !NATIVE_SIZES.has(size)) size = '1024x1024';
+  // 本次豆包只做文生图，忽略参考图（改图/多图后续再开）。
+  const refImages = caps ? [] : (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
+  if (!caps && refImages.length && !NATIVE_SIZES.has(size)) size = '1024x1024';
   await persistConv(conv);
 
   const pendingEl = document.createElement('div');
@@ -1451,7 +1526,7 @@ async function sendImageGen(prompt) {
     </div>`;
   pendingEl.querySelector('.msg-role-name').textContent = model;
   pendingEl.querySelector('.gen-pending-text .mono').textContent =
-    refImages.length ? `${size} · 按图改图` : size;
+    (!caps && refImages.length) ? `${size} · 按图改图` : sizeLabel;
   $('messages').appendChild(pendingEl);
   scrollToBottom(true);
 
@@ -1469,7 +1544,7 @@ async function sendImageGen(prompt) {
     const res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/images`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, size, quality, refs }),
+      body: JSON.stringify({ model, prompt, size, quality, output_format: outputFormat, refs }),
       signal: ctrl.signal,
     });
 
@@ -1510,7 +1585,7 @@ async function sendImageGen(prompt) {
       role: 'assistant', kind: 'image', model,
       text: revised ? `*${revised}*` : '',
       images,
-      meta: `${size} · ${secs}s`,
+      meta: `${sizeLabel} · ${secs}s`,
       createdAt: Date.now(),              // 生图完成时间
     };
     conv.messages.push(msg);
