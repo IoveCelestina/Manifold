@@ -1017,8 +1017,10 @@ function buildImages(urls, downloadable) {
     const wrap = document.createElement('div');
     wrap.className = 'msg-img-wrap';
     const img = document.createElement('img');
-    img.src = u;
+    img.loading = 'lazy';       // 只加载滚动到可见的图，避免一次性解码整轮对话的大图（4K 图解码极耗内存）
+    img.decoding = 'async';     // 异步解码，不阻塞主线程
     img.alt = `图片 ${i + 1}`;
+    img.src = u;                // src 在 loading/decoding 之后设，确保懒加载生效
     img.addEventListener('click', () => openLightbox(u));
     wrap.appendChild(img);
     if (downloadable) {

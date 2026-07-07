@@ -444,6 +444,8 @@ input:focus, textarea:focus, select:focus {
 .msg-img-wrap { position: relative; }
 .msg-images img {
   max-width: 320px; max-height: 320px;
+  min-height: 120px;                 /* 占位高度：加载前撑开，让屏外图真正不可见 → loading=lazy 生效 */
+  background: var(--hairline);        /* 加载中的骨架底色 */
   border-radius: 10px;
   border: 1px solid var(--hairline);
   display: block;
