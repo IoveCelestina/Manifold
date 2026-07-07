@@ -1420,6 +1420,13 @@ async function runGen(conv, aMsg, ctrl, doRequest, runReader) {
     aMsg._pending = false;
     aMsg.createdAt = Date.now();
     patchGen(conv, aMsg);
+    // 登录态生图完成：流式用的是 base64 dataURL（组图多张 4K 会撑爆浏览器解码内存导致破图，且
+    // dataURL 懒加载不生效）。从 DB 重拉规范状态 → 换成 blob 链接（懒加载生效、只解码可见的、已去重）。
+    if (aMsg.kind === 'image' && useServer()) {
+      conv.messages = null;
+      await ensureMessages(conv);
+      if (state.currentId === conv.id) renderMessages();
+    }
   } catch (err) {
     dropMsg(conv, aMsg);
     const kept = aMsg.kind === 'image' ? aMsg.images.length : aMsg.text;

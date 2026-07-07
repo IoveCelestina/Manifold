@@ -1297,13 +1297,18 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     if (!bufs.length) return 0;
     const aid = newMsgId();
     db.insertMessage({ id: aid, convId, uid, seq: db.nextSeq(convId, uid), role: 'assistant', kind: 'image', model, text: revised ? `*${revised}*` : '' });
-    bufs.forEach((b, i) => {
+    // 同一条消息内按内容去重：火山对「硬凑张数的组图」有时返回多张完全相同的图（字节一致 → 同 hash）。
+    // 只落唯一图、只对唯一图计费（返回唯一张数，多预扣的在 finally 退差额）。
+    const seen = new Set<string>();
+    bufs.forEach((b) => {
       const h = sha256(b.buf);
+      if (seen.has(h)) return;             // 本条消息内重复图：跳过（不重复 link、不重复计费）
+      seen.add(h);
       if (!db.getBlobMeta(h)) { fs.writeFileSync(blobPath(h), b.buf); db.insertBlob(h, b.mime || 'image/png', b.buf.length); }
-      db.linkBlob(aid, h, i);
+      db.linkBlob(aid, h, seen.size - 1);
     });
     db.touchConv(uid, convId);
-    return bufs.length;
+    return seen.size;                       // 唯一图数 = 计费张数
   };
 
   // ── keyonly：原直连路径（断开即掐、不落库）──
