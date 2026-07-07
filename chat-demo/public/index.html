@@ -160,6 +160,8 @@
           </select>
           <!-- 宽高比：仅豆包模型出现；与分辨率档一起映射成精确像素（选项由 app.js 填充） -->
           <select id="ratio-select" class="hidden" title="宽高比"></select>
+          <!-- 生成数量（组图）：仅豆包；选项 1..N 由 app.js 按「参考图数 + 生成数 ≤ 15」填充 -->
+          <select id="count-select" class="hidden" title="生成数量（组图）"></select>
           <select id="quality-select" title="质量档位：低档更快更省">
             <option value="auto">质量·auto</option>
             <option value="low">质量·低</option>
@@ -168,6 +170,16 @@
           </select>
           <!-- 输出格式：仅豆包模型出现（且只有 5.0 lite 可选 png/jpeg），选项由 app.js 按模型填充 -->
           <select id="output-format-select" class="hidden" title="输出格式"></select>
+          <!-- 联网搜索：仅豆包 5.0 lite 出现 -->
+          <select id="websearch-select" class="hidden" title="联网搜索（融合实时信息，略增时延）">
+            <option value="off">联网·关</option>
+            <option value="on">联网·开</option>
+          </select>
+          <!-- 提词模式：仅豆包 4.0 出现（极速更快、略降质） -->
+          <select id="promptmode-select" class="hidden" title="提词优化模式">
+            <option value="standard">提词·标准</option>
+            <option value="fast">提词·极速</option>
+          </select>
         </div>
         <div class="composer-row">
           <button class="btn-icon" id="btn-attach" title="上传图片（识图）">

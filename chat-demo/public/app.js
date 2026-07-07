@@ -17,11 +17,12 @@ const FALLBACK_IMAGE_MODEL = 'gpt-image-2';
 // 每个模型只暴露它支持的参数：分辨率档 sizes、输出格式 formats（仅 5.0 lite 可 png/jpeg，4.5/4.0 固定 jpeg）。
 // 计费在后端（按模型单价×出图张数），前端不涉及金额。
 const DOUBAO_CAPS = {
-  'doubao-seedream-5-0-260128': { label: 'Seedream 5.0 lite', sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'] },
-  'doubao-seedream-4-5-251128': { label: 'Seedream 4.5',      sizes: ['2K', '4K'],       formats: ['jpeg'] },
-  'doubao-seedream-4-0-250828': { label: 'Seedream 4.0',      sizes: ['1K', '2K', '4K'], formats: ['jpeg'] },
+  'doubao-seedream-5-0-260128': { label: 'Seedream 5.0 lite', sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'], webSearch: true,  fast: false },
+  'doubao-seedream-4-5-251128': { label: 'Seedream 4.5',      sizes: ['2K', '4K'],       formats: ['jpeg'],        webSearch: false, fast: false },
+  'doubao-seedream-4-0-250828': { label: 'Seedream 4.0',      sizes: ['1K', '2K', '4K'], formats: ['jpeg'],        webSearch: false, fast: true  },
 };
 const DOUBAO_IMAGE_MODELS = Object.keys(DOUBAO_CAPS);
+const DOUBAO_MAX_IMAGES = 10;   // 组图一次最多张数（与后端一致；实际上限还受「参考图数 + 生成数 ≤ 15」约束）
 // gpt-image 的尺寸档（豆包各用自己的 sizes；见 syncImagegenControls）
 const GPT_SIZES = [
   { v: 'auto', t: 'auto' }, { v: '1024x1024', t: '1024×1024' }, { v: '1536x1024', t: '1536×1024' },
@@ -737,9 +738,12 @@ function fillSelect(sel, items, defVal) {
   sel.value = items.some((i) => i.v === prev) ? prev : defVal;
 }
 
+// 当前生图附件里的图片数（豆包参考图；决定组图上限：参考图数 + 生成数 ≤ 15）。
+function imgAttachCount() { return state.attachments.filter((a) => a.kind === 'image').length; }
+
 // 按当前模型让生图控件「只暴露该模型支持的参数」：
-//   豆包 → 分辨率用该模型档、隐藏 quality、输出格式仅 5.0 lite 可选(png/jpeg)；
-//   gpt-image → gpt 尺寸档 + quality、隐藏输出格式。
+//   豆包 → 分辨率档 + 宽高比 + 生成数量(组图) + 输出格式(5.0lite) + 联网搜索(5.0lite) + 提词模式(4.0)，隐藏 quality；
+//   gpt-image → gpt 尺寸档 + quality，隐藏其余豆包控件。
 function syncImagegenControls() {
   if (!isImageMode()) return;
   const model = currentModel();
@@ -748,20 +752,37 @@ function syncImagegenControls() {
   const qSel = $('quality-select');
   const fSel = $('output-format-select');
   const rSel = $('ratio-select');
+  const cSel = $('count-select');
+  const wSel = $('websearch-select');
+  const pSel = $('promptmode-select');
   if (caps) {
     fillSelect(sizeSel, caps.sizes.map((s) => ({ v: s, t: s })), caps.sizes.includes('2K') ? '2K' : caps.sizes[0]);
     fillSelect(rSel, DOUBAO_RATIOS.map((r) => ({ v: r, t: '比例·' + r })), '1:1');
     rSel.classList.remove('hidden');
     qSel.classList.add('hidden');
+    // 生成数量（组图）：上限 = min(10, 15 − 参考图数)
+    const maxCount = Math.max(1, Math.min(DOUBAO_MAX_IMAGES, 15 - imgAttachCount()));
+    fillSelect(cSel, Array.from({ length: maxCount }, (_, i) => ({ v: String(i + 1), t: i === 0 ? '单张' : `组图·${i + 1}张` })), '1');
+    cSel.classList.remove('hidden');
+    // 输出格式：仅 5.0 lite 可选 png/jpeg
     if (caps.formats.length > 1) {
       fillSelect(fSel, caps.formats.map((f) => ({ v: f, t: '格式·' + f.toUpperCase() })), caps.formats[0]);
       fSel.classList.remove('hidden');
     } else {
       fSel.classList.add('hidden');   // 4.5/4.0 固定 jpeg，无可选项
     }
+    // 联网搜索：仅 5.0 lite
+    wSel.classList.toggle('hidden', !caps.webSearch);
+    if (!caps.webSearch) wSel.value = 'off';
+    // 提词模式：仅 4.0 有 fast
+    pSel.classList.toggle('hidden', !caps.fast);
+    if (!caps.fast) pSel.value = 'standard';
   } else {
     fillSelect(sizeSel, GPT_SIZES, '1024x1024');
     rSel.classList.add('hidden');      // 宽高比仅豆包用（gpt 用具体像素档）
+    cSel.classList.add('hidden');
+    wSel.classList.add('hidden');
+    pSel.classList.add('hidden');
     qSel.classList.remove('hidden');
     fSel.classList.add('hidden');
     syncSizeOptions();                 // gpt /edits 尺寸限制
@@ -1145,7 +1166,7 @@ function renderAttachments() {
     chip.appendChild(del);
     box.appendChild(chip);
   });
-  syncSizeOptions();
+  syncImagegenControls();   // 附件增减 → 重算豆包组图上限（参考图数 + 生成数 ≤ 15）；gpt 内部转 syncSizeOptions
 }
 
 // Ctrl/⌘+V 粘贴：剪贴板含图片/文本文件才介入，纯文本粘贴照常进输入框。
@@ -1415,9 +1436,8 @@ async function sendChat(text) {
 /** 宽容地解析流式生图 SSE：兼容官方 image_generation.partial_image / image_edit.* 事件，
  *  也接住各种代理自创的 {b64_json} / {data:[{b64_json|url}]} 形态。 */
 async function readImageSse(res, pendingEl) {
-  let lastB64 = null;
-  let finalB64 = null;
-  let finalUrl = null;
+  const finalImages = [];   // 最终图（dataURL 或 http url）；组图会有多张
+  let lastPartialB64 = null;
   let revised = '';
   let mime = 'image/png';
 
@@ -1434,28 +1454,32 @@ async function readImageSse(res, pendingEl) {
     previewImg.src = dataUri;
     scrollToBottom(false);
   };
+  const pushImg = (b64, url) => {
+    if (b64) { finalImages.push(`data:${mime};base64,${b64}`); showPartial(`data:${mime};base64,${b64}`); }
+    else if (url) { finalImages.push(url); showPartial(url); }
+  };
 
   const handleEvent = (j) => {
     if (!j || typeof j !== 'object') return;
     if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
     if (j.output_format) mime = `image/${j.output_format}`;
     if (j.revised_prompt) revised = j.revised_prompt;
-
-    const type = j.type || '';
-    if (typeof j.b64_json === 'string' && j.b64_json) {
-      lastB64 = j.b64_json;
-      if (type.includes('partial')) showPartial(`data:${mime};base64,${j.b64_json}`);
-      else if (type.includes('completed') || !type) finalB64 = j.b64_json;
-    } else if (typeof j.url === 'string' && j.url) {
-      if (type.includes('partial')) showPartial(j.url);
-      else finalUrl = j.url;
-    }
+    // 整包非流式：data:[{b64_json|url}]（组图可能多张）
     if (Array.isArray(j.data) && j.data.length) {
-      const d = j.data[0];
-      if (d.b64_json) finalB64 = d.b64_json;
-      else if (d.url) finalUrl = d.url;
-      if (d.revised_prompt) revised = d.revised_prompt;
+      for (const d of j.data) { if (d.revised_prompt) revised = d.revised_prompt; pushImg(d.b64_json, d.url); }
+      return;
     }
+    const type = j.type || '';
+    const b64 = typeof j.b64_json === 'string' ? j.b64_json : '';
+    const url = typeof j.url === 'string' ? j.url : '';
+    if (!b64 && !url) return;
+    // 渐进预览（partial_image，非 succeeded）：只刷预览、不算最终
+    if (type.includes('partial') && !type.includes('succeeded')) {
+      if (b64) { lastPartialB64 = b64; showPartial(`data:${mime};base64,${b64}`); }
+      else if (url) showPartial(url);
+      return;
+    }
+    pushImg(b64, url);   // partial_succeeded（火山组图一张）/ completed（gpt-image）/ 裸最终
   };
 
   const reader = res.body.getReader();
@@ -1481,10 +1505,7 @@ async function readImageSse(res, pendingEl) {
   buf += decoder.decode();
   for (const line of buf.split('\n')) if (line.trim()) handleLine(line);
 
-  const b64 = finalB64 || lastB64;
-  const images = [];
-  if (b64) images.push(`data:${mime};base64,${b64}`);
-  else if (finalUrl) images.push(finalUrl);
+  const images = finalImages.length ? finalImages : (lastPartialB64 ? [`data:${mime};base64,${lastPartialB64}`] : []);
   if (!images.length) throw new Error('流式响应结束但没有收到图片数据');
   return { images, revised };
 }
@@ -1507,11 +1528,18 @@ async function sendImageGen(prompt) {
   const quality = $('quality-select').value;
   // 输出格式：仅豆包 5.0 lite 有该控件（png/jpeg）；其余模型不传（后端按模型兜底）。
   const outputFormat = caps && caps.formats.length > 1 ? $('output-format-select').value : undefined;
+  // 豆包扩展参数：生成数量（组图）、联网搜索（仅 5.0lite）、fast 提词（仅 4.0）。
+  let count = 1, webSearch = false, promptMode = 'standard';
+  if (caps) {
+    count = Math.max(1, Math.min(DOUBAO_MAX_IMAGES, Number($('count-select').value) || 1));
+    webSearch = caps.webSearch && $('websearch-select').value === 'on';
+    promptMode = (caps.fast && $('promptmode-select').value === 'fast') ? 'fast' : 'standard';
+    if (count > 1) sizeLabel += ` · ×${count}`;
+  }
   const userMsg = pushUserMessage(conv, prompt);
-  // 生图只取图片附件作参考图（文本文件忽略）；附了参考图 → 后端走 edits 改图。
-  // 本次豆包只做文生图，忽略参考图（改图/多图后续再开）。
-  const refImages = caps ? [] : (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
-  if (!caps && refImages.length && !NATIVE_SIZES.has(size)) size = '1024x1024';
+  // 生图取图片附件作参考图（文本文件忽略）：gpt 走 /edits 改图；豆包走图生图/多图融合/图生组图。
+  const refImages = (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
+  if (!caps && refImages.length && !NATIVE_SIZES.has(size)) size = '1024x1024';   // 仅 gpt /edits 尺寸限制
   await persistConv(conv);
 
   const pendingEl = document.createElement('div');
@@ -1544,7 +1572,7 @@ async function sendImageGen(prompt) {
     const res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/images`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, size, quality, output_format: outputFormat, refs }),
+      body: JSON.stringify({ model, prompt, size, quality, output_format: outputFormat, refs, count, web_search: webSearch, prompt_mode: promptMode }),
       signal: ctrl.signal,
     });
 

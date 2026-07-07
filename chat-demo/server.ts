@@ -974,16 +974,28 @@ function drainOnce(res: ServerResponse): Promise<boolean> {
 
 // 解析上游生图响应（SSE 逐事件 或 整包 JSON），累积出最终图。复刻前端 readImageSse 的宽容逻辑。
 function makeImageParser() {
-  let lastB64: string | null = null, finalB64: string | null = null, finalUrl: string | null = null, revised = '', mime = 'image/png';
+  const images: { b64?: string; url?: string }[] = [];   // 收集所有最终图（组图会有多张，按到达顺序）
+  let lastPartialB64: string | null = null;              // 最近一次渐进预览，无 succeeded 时兜底
+  let revised = '', mime = 'image/png';
   let sbuf = '';
+  const pushImg = (b64?: string, url?: string) => { if (b64) images.push({ b64 }); else if (url) images.push({ url }); };
   const handle = (j: any) => {
     if (!j || typeof j !== 'object') return;
     if (j.output_format) mime = 'image/' + j.output_format;
     if (j.revised_prompt) revised = j.revised_prompt;
+    // 整包非流式：data:[{b64_json|url}]（组图可能多张）
+    if (Array.isArray(j.data) && j.data.length) {
+      for (const d of j.data) { if (d.revised_prompt) revised = d.revised_prompt; pushImg(d.b64_json, d.url); }
+      return;
+    }
     const type = j.type || '';
-    if (typeof j.b64_json === 'string' && j.b64_json) { lastB64 = j.b64_json; if (type.includes('completed') || !type) finalB64 = j.b64_json; }
-    else if (typeof j.url === 'string' && j.url) { if (!type.includes('partial')) finalUrl = j.url; }
-    if (Array.isArray(j.data) && j.data.length) { const d = j.data[0]; if (d.b64_json) finalB64 = d.b64_json; else if (d.url) finalUrl = d.url; if (d.revised_prompt) revised = d.revised_prompt; }
+    const b64 = typeof j.b64_json === 'string' ? j.b64_json : '';
+    const url = typeof j.url === 'string' ? j.url : '';
+    if (!b64 && !url) return;
+    // 渐进预览（partial_image，非 succeeded）：只记预览、不算最终
+    if (type.includes('partial') && !type.includes('succeeded')) { if (b64) lastPartialB64 = b64; return; }
+    // partial_succeeded（火山组图一张最终）/ completed（gpt-image 最终）/ 裸最终
+    pushImg(b64, url);
   };
   return {
     feedSse(chunkText: string) {
@@ -992,7 +1004,10 @@ function makeImageParser() {
       for (const line of lines) { const t = line.trim(); if (!t.startsWith('data:')) continue; const p = t.slice(5).trim(); if (!p || p === '[DONE]') continue; try { handle(JSON.parse(p)); } catch { /* */ } }
     },
     feedJson(s: string) { try { handle(JSON.parse(s)); } catch { /* */ } },
-    result() { return { b64: finalB64 || lastB64, url: finalUrl, revised, mime }; },
+    result() {
+      const imgs = images.length ? images : (lastPartialB64 ? [{ b64: lastPartialB64 }] : []);
+      return { images: imgs, revised, mime };
+    },
   };
 }
 
@@ -1049,12 +1064,20 @@ function isDoubaoModel(m: any): boolean { return typeof m === 'string' && DOUBAO
 // 各豆包模型的能力 + 单价（USD）。关键事实：火山按「模型 × 成功出图张数」计费，与分辨率无关，
 // 所以这里单价即每张价；¥官价数字直接当 $（4.0 ¥0.20→$0.20 / 5.0lite ¥0.22→$0.22 / 4.5 ¥0.25→$0.25），
 // 可用 env 覆盖。sizes/formats 用于「只给该模型支持的参数」（含后端兜底校验）。
-const DOUBAO_CAPS: Record<string, { sizes: string[]; formats: string[]; price: number }> = {
-  'doubao-seedream-5-0-260128': { sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'], price: Number(process.env.DOUBAO_PRICE_5_0_LITE || 0.22) },
-  'doubao-seedream-4-5-251128': { sizes: ['2K', '4K'],       formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_5 || 0.25) },
-  'doubao-seedream-4-0-250828': { sizes: ['1K', '2K', '4K'], formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_0 || 0.20) },
+const DOUBAO_CAPS: Record<string, { sizes: string[]; formats: string[]; price: number; webSearch: boolean; fast: boolean }> = {
+  'doubao-seedream-5-0-260128': { sizes: ['2K', '3K', '4K'], formats: ['png', 'jpeg'], price: Number(process.env.DOUBAO_PRICE_5_0_LITE || 0.22), webSearch: true,  fast: false },
+  'doubao-seedream-4-5-251128': { sizes: ['2K', '4K'],       formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_5 || 0.25),     webSearch: false, fast: false },
+  'doubao-seedream-4-0-250828': { sizes: ['1K', '2K', '4K'], formats: ['jpeg'],        price: Number(process.env.DOUBAO_PRICE_4_0 || 0.20),     webSearch: false, fast: true  },
 };
 function doubaoPrice(model: string): number { return DOUBAO_CAPS[model]?.price ?? DOUBAO_PRICE_USD; }
+
+// 组图一次最多出几张（火山约束：参考图数 + 生成数 ≤ 15）。默认上限 10，可 env 覆盖。
+const DOUBAO_MAX_IMAGES = Number(process.env.DOUBAO_MAX_IMAGES || 10);
+function doubaoCount(reqCount: any, refsLen: number): number {
+  const cap = Math.max(1, Math.min(DOUBAO_MAX_IMAGES, 15 - refsLen));
+  const n = Math.floor(Number(reqCount) || 1);
+  return Math.max(1, Math.min(cap, n));
+}
 
 // 前端尺寸档 → 火山 size：接受 1K/2K/3K/4K（方式1，按模型校验，非法档退 2K/首档）或 WxH（方式2，像素透传）；
 // auto/空 → null（交火山默认 2K）。挡住「gpt 的 1024x1024 透传给 5.0lite/4.5 触发最小像素报错」这类问题。
@@ -1079,6 +1102,28 @@ function doubaoFormat(reqFmt: any, model: string): string {
     return caps.formats.includes(f) ? f : caps.formats[0];
   }
   return caps ? caps.formats[0] : 'png';
+}
+
+// 组装发给火山方舟的 payload（覆盖全部能力：文/图生图、多图融合、组图、联网搜索、fast 提词、流式）。
+// count 已由 doubaoCount clamp 好；refDataUrls 是参考图的 base64 data URL（0/1/多张）。
+function doubaoBuildPayload(model: string, prompt: string, size: any, body: any, refDataUrls: string[], count: number, stream: boolean): any {
+  const caps = DOUBAO_CAPS[model];
+  const payload: any = { model, prompt, response_format: 'b64_json', watermark: false };
+  const s = mapDoubaoSize(size, model); if (s) payload.size = s;
+  // 仅 5.0 lite 支持自定义输出格式；4.5/4.0 固定 jpeg，不发该字段。
+  if (caps && caps.formats.length > 1) payload.output_format = doubaoFormat(body.output_format, model);
+  // 参考图：单张 → 字符串，多张 → 数组（图生图 / 多图融合 / 图生组图）。
+  if (refDataUrls.length === 1) payload.image = refDataUrls[0];
+  else if (refDataUrls.length > 1) payload.image = refDataUrls;
+  // 组图：count>1 → 顺序生成 auto + max_images；否则显式 disabled（单图）。
+  if (count > 1) { payload.sequential_image_generation = 'auto'; payload.sequential_image_generation_options = { max_images: count }; }
+  else payload.sequential_image_generation = 'disabled';
+  // 联网搜索（仅 5.0 lite 支持，融合实时信息）。
+  if (caps && caps.webSearch && body.web_search === true) payload.tools = [{ type: 'web_search' }];
+  // fast 提词模式（仅 4.0 支持；5.0lite/4.5 仅 standard）。
+  if (caps && caps.fast && String(body.prompt_mode) === 'fast') payload.optimize_prompt_options = { mode: 'fast' };
+  if (stream) payload.stream = true;
+  return payload;
 }
 // 调 sub2api 管理接口调整某用户余额（operation: subtract 扣 / add 退）。金额单位 USD。
 // x-api-key 仅用于鉴权（证明有权操作）；扣的是 URL 里 {uid} 那个用户，与 admin 自身余额无关。
@@ -1105,7 +1150,8 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
 
   // 豆包生图：直连火山、需登录（要按 uid 扣费）、需配置齐全。keyonly / 未配置直接挡回。
   const doubao = isDoubaoModel(model);
-  let doubaoCharge: { idemKey: string } | null = null;
+  let doubaoCharge: { idemKey: string; count: number; price: number } | null = null;
+  let doubaoImgCount = 1;   // 豆包组图张数（= 预扣张数，doRequest 组 payload 用）
   // 豆包出图的有效文件格式（用于发火山 + 定持久化 mime）：5.0lite png/jpeg、4.5/4.0 jpeg。
   const doubaoMime: string | null = doubao ? ('image/' + doubaoFormat(body.output_format, model)) : null;
   if (doubao && keyonly) { sendJson(res, 400, { error: { message: '豆包生图需登录账号后使用' } }); return; }
@@ -1127,12 +1173,16 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
       .filter(Boolean) as { buf: Buffer; mime: string }[];
   } else {
     const uid = session.uid;
-    // 豆包：先扣费闸门 —— 余额不足时 sub2api 直接拒绝（balance 不能为负），此时不落 user 消息、不出图。
+    const refs: string[] = Array.isArray(body.refs) ? body.refs.filter((h: any) => typeof h === 'string' && HASH_RE.test(h)) : [];
+    // 豆包：先扣费闸门 —— 组图按张数预扣（count 受参考图数与上限约束）；余额不足时 sub2api 拒绝
+    // （balance 不能为负），此时不落 user 消息、不出图。出图后按实际成功张数退差额。
     if (doubao) {
+      doubaoImgCount = doubaoCount(body.count, refs.length);
       const idemKey = 'dbimg_' + crypto.randomBytes(8).toString('hex');
+      const price = doubaoPrice(model);
       try {
-        await adjustUserBalance(uid, doubaoPrice(model), 'subtract', idemKey, `豆包生图 ${model}`);
-        doubaoCharge = { idemKey };
+        await adjustUserBalance(uid, price * doubaoImgCount, 'subtract', idemKey, `豆包生图 ${model} ×${doubaoImgCount}`);
+        doubaoCharge = { idemKey, count: doubaoImgCount, price };
       } catch (e: any) {
         const msg = String(e?.message || '');
         const insufficient = /negative|不足|insufficient/i.test(msg);
@@ -1140,7 +1190,6 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
         return;
       }
     }
-    const refs: string[] = Array.isArray(body.refs) ? body.refs.filter((h: any) => typeof h === 'string' && HASH_RE.test(h)) : [];
     if (!db.getConvMeta(uid, convId)) db.createConv(uid, convId, String(prompt).slice(0, 24));
     const seq = db.nextSeq(convId, uid);
     const userMsgId = newMsgId();
@@ -1156,13 +1205,15 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(new Error('上游超时')), 10 * 60 * 1000);
 
+  // 豆包参考图 → base64 data URL（图生图 / 多图融合 / 图生组图）；mime 用小写（火山要求）。
+  const doubaoRefDataUrls: string[] = doubao
+    ? refBlobs.map((b) => `data:${(b.mime || 'image/png').toLowerCase()};base64,${b.buf.toString('base64')}`)
+    : [];
+
   const doRequest = (stream: boolean): Promise<Response> => {
-    // 豆包：直连火山方舟（非流式、要 b64_json、关水印），不经 sub2api；忽略 quality / 参考图。
+    // 豆包：直连火山方舟（b64_json、关水印、可流式），不经 sub2api。覆盖文/图生图、多图融合、组图、联网搜索、fast。
     if (doubao) {
-      const payload: any = { model, prompt, response_format: 'b64_json', watermark: false };
-      const s = mapDoubaoSize(size, model); if (s) payload.size = s;
-      // 仅 5.0 lite 支持自定义输出格式（png/jpeg）；4.5/4.0 固定 jpeg，不发该字段（文档：不支持自定义）。
-      if (DOUBAO_CAPS[model] && DOUBAO_CAPS[model].formats.length > 1) payload.output_format = doubaoFormat(body.output_format, model);
+      const payload = doubaoBuildPayload(model, prompt, size, body, doubaoRefDataUrls, doubaoImgCount, stream);
       return fetch(ARK_BASE + '/images/generations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ARK_API_KEY}` },
@@ -1188,24 +1239,31 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   };
 
   const parser = makeImageParser();
-  // 把最终图存 blob + 落 kind=image 消息（仅登录态调用）。
-  const persistImage = () => {
+  // 把最终图存 blob + 落 kind=image 消息（仅登录态调用）。组图多张 → 一条消息挂多个 blob。
+  // 返回实际持久化张数（= 成功出图张数，供豆包按张退差额）。
+  const persistImage = (): number => {
     const uid = session.uid;
-    const { b64, url, revised, mime } = parser.result();
-    let imgBuf: Buffer | null = null, imgMime = mime;
-    if (b64) { imgBuf = Buffer.from(b64, 'base64'); if (doubaoMime) imgMime = doubaoMime; }
-    else if (url && url.startsWith('data:')) {
-      const ci = url.indexOf(','); const semi = url.indexOf(';');
-      imgMime = (semi > 5 ? url.slice(5, semi) : mime); imgBuf = Buffer.from(url.slice(ci + 1), 'base64');
+    const { images, revised, mime } = parser.result();
+    const bufs: { buf: Buffer; mime: string }[] = [];
+    for (const im of images) {
+      let buf: Buffer | null = null, m = doubaoMime || mime;
+      if (im.b64) { buf = Buffer.from(im.b64, 'base64'); }
+      else if (im.url && im.url.startsWith('data:')) {
+        const ci = im.url.indexOf(','); const semi = im.url.indexOf(';');
+        m = (semi > 5 ? im.url.slice(5, semi) : m); buf = Buffer.from(im.url.slice(ci + 1), 'base64');
+      }
+      if (buf && buf.length) bufs.push({ buf, mime: m });
     }
-    if (imgBuf && imgBuf.length) {
-      const h = sha256(imgBuf);
-      if (!db.getBlobMeta(h)) { fs.writeFileSync(blobPath(h), imgBuf); db.insertBlob(h, imgMime || 'image/png', imgBuf.length); }
-      const aid = newMsgId();
-      db.insertMessage({ id: aid, convId, uid, seq: db.nextSeq(convId, uid), role: 'assistant', kind: 'image', model, text: revised ? `*${revised}*` : '' });
-      db.linkBlob(aid, h, 0);
-      db.touchConv(uid, convId);
-    }
+    if (!bufs.length) return 0;
+    const aid = newMsgId();
+    db.insertMessage({ id: aid, convId, uid, seq: db.nextSeq(convId, uid), role: 'assistant', kind: 'image', model, text: revised ? `*${revised}*` : '' });
+    bufs.forEach((b, i) => {
+      const h = sha256(b.buf);
+      if (!db.getBlobMeta(h)) { fs.writeFileSync(blobPath(h), b.buf); db.insertBlob(h, b.mime || 'image/png', b.buf.length); }
+      db.linkBlob(aid, h, i);
+    });
+    db.touchConv(uid, convId);
+    return bufs.length;
   };
 
   // ── keyonly：原直连路径（断开即掐、不落库）──
@@ -1264,13 +1322,12 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   inflight.set(key, task);
   bindCancel(task, ctrl);
   taskAttach(task, res);
-  let imgOk = false;
+  let persistedCount = 0;   // 实际成功出图 + 落库张数（豆包退差额用）
   try {
     const r = await pumpImageUpstream(doRequest, parser, (b) => taskWrite(task, b));
     if (task.canceled) { /* 用户取消：不落半成品图、不报错 */ }
     else if (r.ok) {
-      const got = parser.result();
-      if (got.b64 || got.url) { persistImage(); imgOk = true; }
+      if (parser.result().images.length) { persistedCount = persistImage(); }
       else task.error = '生图未返回图片';
     }
     else task.error = (r.text || `上游错误 ${r.status}`).slice(0, 2000);
@@ -1278,11 +1335,14 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     if (!task.canceled) task.error = '生图失败: ' + e.message;
   } finally {
     clearTimeout(timeout);
-    // 豆包已扣费但没成功出图（失败 / 取消 / 空图）→ 原路退款，避免用户白付。
-    if (doubaoCharge && !imgOk) {
+    // 豆包按张退差额：预扣 count 张，实际出 persistedCount 张 → 退 (count − 出图数) 张（含全失败=全退）。
+    if (doubaoCharge) {
       const dc = doubaoCharge;
-      adjustUserBalance(session.uid, doubaoPrice(model), 'add', dc.idemKey + '_rf', `豆包生图失败退款 ${model}`)
-        .catch((e: any) => console.error(`[doubao] 退款失败 uid=${session.uid} idem=${dc.idemKey}: ${e.message}`));
+      const refundN = dc.count - persistedCount;
+      if (refundN > 0) {
+        adjustUserBalance(session.uid, dc.price * refundN, 'add', dc.idemKey + '_rf', `豆包生图退款 ${refundN}张 ${model}`)
+          .catch((e: any) => console.error(`[doubao] 退款失败 uid=${session.uid} idem=${dc.idemKey}: ${e.message}`));
+      }
     }
     taskFinish(task);
   }
