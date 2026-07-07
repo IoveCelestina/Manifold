@@ -94,7 +94,7 @@ const state = {
   currentId: null,
   models: [],
   attachments: [],                  // [{dataUrl}]
-  gens: new Map(),                  // convId → { ctrl } —— 每个对话独立的进行中生成（支持多对话并行）
+  gens: new Map(),                  // convId → AbortController —— 每个对话独立的进行中生成（支持多对话并行）
   keysCache: null,                  // 账户 key 列表缓存
 };
 let genSeq = 0;
@@ -292,9 +292,7 @@ async function reconnectInflight(conv) {
   conv._inflight = null;                 // 只触发一次
   if (!kind || state.gens.has(conv.id)) return;
 
-  const ctrl = new AbortController();
-  state.gens.set(conv.id, { ctrl });
-  syncComposer();
+  const ctrl = beginGen(conv);
 
   // 临时占位消息（进行中）；跑完从 DB 重拉规范状态覆盖。数据驱动 → 期间可自由切换对话。
   const aMsg = { role: 'assistant', kind, model: '', text: '', images: [], _genid: newGenId(), _pending: true, _meta: '接上后台生成…' };
@@ -319,12 +317,11 @@ async function reconnectInflight(conv) {
   } catch { /* 出错/中止由下方 DB 同步纠正 */ }
 
   // 收尾：移除临时占位 + 从 DB 重拉规范状态（后端已落库）
-  const idx = conv.messages.indexOf(aMsg);
-  if (idx >= 0) conv.messages.splice(idx, 1);
-  state.gens.delete(conv.id);
+  dropMsg(conv, aMsg);
+  endGen(conv);
   conv.messages = null;
   await ensureMessages(conv);
-  if (state.currentId === conv.id) { renderMessages(); syncComposer(); }
+  if (state.currentId === conv.id) renderMessages();
 }
 
 // 统一加载会话列表（按 useServer 选后端/本地），并设好 currentId
@@ -843,12 +840,8 @@ function renderConvList() {
     del.textContent = '×';
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
-      // 删除正在生成的对话：先停它的生成（abort 本地 + 通知后端取消），再删
-      if (state.gens.has(conv.id)) {
-        state.gens.get(conv.id).ctrl.abort();
-        if (useServer()) fetch(`/api/conversations/${encodeURIComponent(conv.id)}/stream`, { method: 'DELETE' }).catch(() => {});
-        state.gens.delete(conv.id);
-      }
+      // 删除正在生成的对话：先停它的生成，再删
+      if (state.gens.has(conv.id)) { cancelGen(conv.id); state.gens.delete(conv.id); }
       state.convs = state.convs.filter((c) => c.id !== conv.id);
       await store.del(conv.id).catch(() => {});
       if (state.currentId === conv.id) {
@@ -1242,10 +1235,8 @@ $('btn-send').addEventListener('click', onSend);
 function onSend() {
   const cur = currentConv();
   if (cur && state.gens.has(cur.id)) {
-    // 当前对话正在生成 → 停止它：abort 本地观看；登录态再通知后端取消（否则 409 挡下一条）。
-    // 只停「当前对话」，其它对话的生成不受影响（多对话并行的关键）。
-    state.gens.get(cur.id).ctrl.abort();
-    if (useServer()) fetch(`/api/conversations/${encodeURIComponent(cur.id)}/stream`, { method: 'DELETE' }).catch(() => {});
+    // 当前对话正在生成 → 停止它（只停当前对话，其它对话的生成不受影响 —— 多对话并行的关键）。
+    cancelGen(cur.id);
     return;
   }
   const text = inputBox.value.trim();
@@ -1272,9 +1263,31 @@ function patchGen(conv, aMsg) {
   if (old) old.replaceWith(neu); else $('messages').appendChild(neu);
   scrollToBottom(false);
 }
+// 起一个生成：建 AbortController、登记到该对话（供停止/切换/并发护栏用）、刷新按钮态。返回 ctrl。
+function beginGen(conv) {
+  const ctrl = new AbortController();
+  state.gens.set(conv.id, ctrl);
+  syncComposer();
+  return ctrl;
+}
+// 收尾一个生成：注销登记；若正看着该对话则刷新按钮态。
+function endGen(conv) {
+  state.gens.delete(conv.id);
+  if (state.currentId === conv.id) syncComposer();
+}
+// 停止某对话的生成：本地 abort + 通知后端取消（否则后端后台任务不会 done、下一条被 409 挡）。
+function cancelGen(convId) {
+  state.gens.get(convId)?.abort();
+  if (useServer()) fetch(`/api/conversations/${encodeURIComponent(convId)}/stream`, { method: 'DELETE' }).catch(() => {});
+}
+// 从对话消息里移除某条（进行中占位消息收尾/出错时用）。
+function dropMsg(conv, aMsg) {
+  const i = conv.messages.indexOf(aMsg);
+  if (i >= 0) conv.messages.splice(i, 1);
+}
 // 中止所有对话的进行中生成（登出/会话失效时用）。仅断本地观看，后台任务由后端自行收尾。
 function abortAllGens() {
-  for (const g of state.gens.values()) { try { g.ctrl.abort(); } catch { /* ignore */ } }
+  for (const ctrl of state.gens.values()) { try { ctrl.abort(); } catch { /* ignore */ } }
   state.gens.clear();
 }
 
@@ -1367,9 +1380,7 @@ async function sendChat(text) {
   if (state.gens.has(conv.id)) return;              // 该对话已在生成（前端侧并发护栏）
   const model = currentModel();
   const atts = state.attachments.slice();           // 发送前取（pushUserMessage 会清空 attachments）
-  const ctrl = new AbortController();
-  state.gens.set(conv.id, { ctrl });                // 同步占位：防并发双击 + 让按钮/切换立即反映
-  syncComposer();
+  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
 
   await ensureMessages(conv);
   pushUserMessage(conv, text);                      // 发送时一定在当前对话 → 直接乐观渲染 user 气泡
@@ -1382,9 +1393,9 @@ async function sendChat(text) {
   if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
 
   let lastRender = 0;
-  const renderStream = (final) => {
+  const renderStream = () => {
     const now = Date.now();
-    if (!final && now - lastRender < 90) return;
+    if (now - lastRender < 90) return;
     lastRender = now;
     patchGen(conv, aMsg);                            // 只在正看该对话时刷新其 DOM
   };
@@ -1415,14 +1426,13 @@ async function sendChat(text) {
       throw new Error(formatApiError(res.status, errText));
     }
 
-    await pumpChatSse(res, (d) => { aMsg.text += d; renderStream(false); });
+    await pumpChatSse(res, (d) => { aMsg.text += d; renderStream(); });
     if (!aMsg.text) aMsg.text = '（空响应）';
     aMsg._pending = false;
     aMsg.createdAt = Date.now();          // 回复完成时间
     patchGen(conv, aMsg);
   } catch (err) {
-    const idx = conv.messages.indexOf(aMsg);
-    if (idx >= 0) conv.messages.splice(idx, 1);
+    dropMsg(conv, aMsg);
     if (err.name === 'AbortError') {
       if (aMsg.text) {                    // 手动停止：保留已生成部分
         aMsg._pending = false;
@@ -1435,8 +1445,7 @@ async function sendChat(text) {
     }
     if (state.currentId === conv.id) renderMessages();
   } finally {
-    state.gens.delete(conv.id);
-    if (state.currentId === conv.id) syncComposer();
+    endGen(conv);
     await persistConv(conv);
   }
 }
@@ -1532,9 +1541,7 @@ async function sendImageGen(prompt) {
     promptMode = (caps.fast && $('promptmode-select').value === 'fast') ? 'fast' : 'standard';
     if (count > 1) sizeLabel += ` · ×${count}`;
   }
-  const ctrl = new AbortController();
-  state.gens.set(conv.id, { ctrl });                // 同步占位：防并发双击 + 让按钮/切换立即反映
-  syncComposer();
+  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
 
   await ensureMessages(conv);
   const userMsg = pushUserMessage(conv, prompt);
@@ -1603,16 +1610,14 @@ async function sendImageGen(prompt) {
     aMsg.createdAt = Date.now();          // 生图完成时间
     patchGen(conv, aMsg);
   } catch (err) {
-    const idx = conv.messages.indexOf(aMsg);
-    if (idx >= 0) conv.messages.splice(idx, 1);
+    dropMsg(conv, aMsg);
     if (err.name !== 'AbortError') pushErrorMessage(conv, err.message);
     else if (aMsg.images.length) {        // 手动停止但已出了图 → 保留
       aMsg._pending = false; aMsg.createdAt = Date.now(); conv.messages.push(aMsg);
     }
     if (state.currentId === conv.id) renderMessages();
   } finally {
-    state.gens.delete(conv.id);
-    if (state.currentId === conv.id) syncComposer();
+    endGen(conv);
     await persistConv(conv);
   }
 }
