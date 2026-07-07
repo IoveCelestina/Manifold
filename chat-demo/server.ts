@@ -1041,12 +1041,31 @@ async function pumpImageUpstream(
   if (upstream.body) {
     if (ctype.includes('event-stream')) {
       const decoder = new TextDecoder();
+      let sbuf = '';
+      // 逐行处理上游 SSE：喂 parser + 只把「非渐进预览帧」转发给客户端。
+      // 火山流式每张图会发多个 partial_image 渐进帧（每帧都是整张 b64），组图时累积可达数十 MB，
+      // 经 CF 传给国内客户端会中途断（浏览器 network error）。丢弃渐进帧后，响应体从「N×多帧」降到「N×1 张」。
+      const consume = (text: string, last: boolean) => {
+        sbuf += text;
+        const lines = sbuf.split('\n');
+        sbuf = last ? '' : (lines.pop() || '');
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          parser.feedSse(line + '\n');
+          const p = t.slice(5).trim();
+          if (!p) continue;
+          if (p === '[DONE]') { onChunk(Buffer.from('data: [DONE]\n\n')); continue; }
+          let drop = false;
+          try { const ty = JSON.parse(p).type || ''; if (ty.includes('partial') && !ty.includes('succeeded')) drop = true; } catch { /* 非 JSON 一律转发 */ }
+          if (!drop) onChunk(Buffer.from('data: ' + p + '\n\n'));
+        }
+      };
       try {
         for await (const chunk of Readable.fromWeb(upstream.body)) {
-          const b = Buffer.from(chunk);
-          parser.feedSse(decoder.decode(b, { stream: true }));
-          onChunk(b);
+          consume(decoder.decode(Buffer.from(chunk), { stream: true }), false);
         }
+        consume(decoder.decode(), true);
       } catch (e: any) { console.error(`[image-task] stream interrupted: ${e.message}`); }
     } else {
       const buf = Buffer.from(await upstream.arrayBuffer());
