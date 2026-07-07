@@ -94,9 +94,11 @@ const state = {
   currentId: null,
   models: [],
   attachments: [],                  // [{dataUrl}]
-  streaming: null,                  // AbortController | null
+  gens: new Map(),                  // convId → { ctrl } —— 每个对话独立的进行中生成（支持多对话并行）
   keysCache: null,                  // 账户 key 列表缓存
 };
+let genSeq = 0;
+const newGenId = () => 'g_' + (++genSeq);   // 生成中消息的稳定 DOM 定位 id（data-genid）
 
 // 是否已认证（账号登录或 keyonly 都算）
 function isAuthed() { return !!state.me; }
@@ -193,7 +195,7 @@ async function loadSession() {
 }
 
 function handleSessionExpired() {
-  if (state.streaming) { try { state.streaming.abort(); } catch { /* ignore */ } state.streaming = null; }
+  abortAllGens();
   state.me = null;
   state.keysCache = null;
   state.convs = [];
@@ -266,18 +268,19 @@ async function ensureMessages(conv) {
 
 // 切到某会话并确保正文已加载（流式中不切，避免写串）
 async function openConv(id) {
-  if (state.streaming) return;
+  // 多对话并行：随时可切换。切走的对话若在生成，其 reader 仍在后台跑（只更新数据），切回照常显示。
   state.currentId = id;
   renderConvList();
   renderMessages();
-  closeDrawer();          // 移动端：选中会话后收起抽屉
+  syncComposer();          // 按钮跟随目标对话的生成状态
+  closeDrawer();           // 移动端：选中会话后收起抽屉
   const conv = currentConv();
   if (conv && !Array.isArray(conv.messages)) {
     await ensureMessages(conv);
-    if (state.currentId === id) renderMessages();
+    if (state.currentId === id) { renderMessages(); syncComposer(); }
   }
-  // 该会话有在途生成（如刷新前正在跑的回复）→ 接上后台流继续看
-  if (conv && conv._inflight && state.currentId === id && !state.streaming) {
+  // 目标对话有后端在途生成、但前端此刻没有活跃 reader（如刷新后）→ 重连接上
+  if (conv && conv._inflight && state.currentId === id && !state.gens.has(id)) {
     reconnectInflight(conv);   // 不 await：已加载的消息先渲染，再续接在途流
   }
 }
@@ -287,56 +290,41 @@ async function openConv(id) {
 async function reconnectInflight(conv) {
   const kind = conv._inflight?.kind;
   conv._inflight = null;                 // 只触发一次
-  if (!kind || state.streaming) return;
+  if (!kind || state.gens.has(conv.id)) return;
 
   const ctrl = new AbortController();
-  state.streaming = ctrl;                 // 复用流式态：停止按钮可中止订阅（生成仍在后台跑完落库）
-  setSending(true);
+  state.gens.set(conv.id, { ctrl });
+  syncComposer();
 
-  // 立刻渲染在途占位（不等 /stream 返回），消除「刷新回来只有提问、没有任何提示」的空窗
-  let aMsg = null, aBody = null;
-  let pendingEl;
-  if (kind === 'image') {
-    pendingEl = document.createElement('div');
-    pendingEl.className = 'msg msg-assistant is-image';
-    pendingEl.innerHTML = `
-      <div class="msg-role"><span class="msg-role-glyph">✦</span><span class="msg-role-name">续接生成中…</span></div>
-      <div class="msg-body"><div class="gen-pending"><div class="gen-rings"><span></span><span></span><span></span></div><div class="gen-pending-text">接上后台生成…</div></div></div>`;
-  } else {
-    aMsg = { role: 'assistant', text: '', kind: 'chat' };
-    pendingEl = buildMsgEl(aMsg);
-    aBody = pendingEl.querySelector('.msg-body');
-    aBody.innerHTML = '<span class="stream-caret"></span>';
-  }
-  $('messages').appendChild(pendingEl);
-  scrollToBottom(true);
-
-  const finish = async () => {
-    setSending(false);                    // 内部已置 state.streaming = null
-    conv.messages = null;
-    await ensureMessages(conv);           // 后端已落库 → 重拉同步
-    if (state.currentId === conv.id) renderMessages();   // 会清掉临时占位、按 DB 规范状态重渲染
-  };
+  // 临时占位消息（进行中）；跑完从 DB 重拉规范状态覆盖。数据驱动 → 期间可自由切换对话。
+  const aMsg = { role: 'assistant', kind, model: '', text: '', images: [], _genid: newGenId(), _pending: true, _meta: '接上后台生成…' };
+  conv.messages.push(aMsg);
+  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
 
   let res;
   try {
     res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/stream`, { signal: ctrl.signal });
-  } catch { await finish(); return; }
-  if (res.status === 204 || !res.ok || !res.body) { await finish(); return; }  // 已无在途任务 → 直接同步
-
-  try {
-    if (kind === 'image') {
-      await readImageSse(res, pendingEl);
-    } else {
-      let last = 0;
-      await pumpChatSse(res, (d) => {
-        aMsg.text += d;
-        const now = Date.now();
-        if (now - last > 90) { last = now; aBody.innerHTML = mdRender(aMsg.text) + '<span class="stream-caret"></span>'; scrollToBottom(false); }
-      });
+    if (res.status !== 204 && res.ok && res.body) {
+      if (kind === 'image') {
+        await readImageSse(res, (imgs) => { aMsg.images = imgs; patchGen(conv, aMsg); });
+      } else {
+        let last = 0;
+        await pumpChatSse(res, (d) => {
+          aMsg.text += d;
+          const now = Date.now();
+          if (now - last > 90) { last = now; patchGen(conv, aMsg); }
+        });
+      }
     }
   } catch { /* 出错/中止由下方 DB 同步纠正 */ }
-  await finish();
+
+  // 收尾：移除临时占位 + 从 DB 重拉规范状态（后端已落库）
+  const idx = conv.messages.indexOf(aMsg);
+  if (idx >= 0) conv.messages.splice(idx, 1);
+  state.gens.delete(conv.id);
+  conv.messages = null;
+  await ensureMessages(conv);
+  if (state.currentId === conv.id) { renderMessages(); syncComposer(); }
 }
 
 // 统一加载会话列表（按 useServer 选后端/本地），并设好 currentId
@@ -457,7 +445,7 @@ $('keyonly-form').addEventListener('submit', async (e) => {
 });
 
 $('btn-logout').addEventListener('click', async () => {
-  if (state.streaming) { state.streaming.abort(); state.streaming = null; }
+  abortAllGens();
   try { await postJson('/api/session/logout', {}); } catch { /* 忽略 */ }
   state.me = null;
   state.keysCache = null;
@@ -663,7 +651,7 @@ function syncComposerMode() {
   $('composer').classList.toggle('mode-image', img);
   $('imagegen-controls').classList.toggle('hidden', !img);
   $('input-box').placeholder = img ? '描述你想生成的画面…（可附参考图改图）' : '输入消息…';
-  if (!state.streaming) $('btn-send').textContent = img ? '生成' : '发送';
+  syncComposer();   // 按钮文字/状态跟随当前对话（生成中显示「停止」，否则「生成/发送」）
   $('composer-hint').textContent = img
     ? '生图模式 · 直接描述 = 文生图 · 附图 = 按参考图改图'
     : 'Enter 发送 · Shift+Enter 换行';
@@ -803,6 +791,7 @@ function newConv() {
   state.currentId = conv.id;
   renderConvList();
   renderMessages();
+  syncComposer();         // 新对话没有进行中生成 → 按钮回到「生成/发送」
   closeDrawer();          // 移动端：新建对话后收起抽屉
   return conv;
 }
@@ -854,12 +843,18 @@ function renderConvList() {
     del.textContent = '×';
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (state.streaming) return;
+      // 删除正在生成的对话：先停它的生成（abort 本地 + 通知后端取消），再删
+      if (state.gens.has(conv.id)) {
+        state.gens.get(conv.id).ctrl.abort();
+        if (useServer()) fetch(`/api/conversations/${encodeURIComponent(conv.id)}/stream`, { method: 'DELETE' }).catch(() => {});
+        state.gens.delete(conv.id);
+      }
       state.convs = state.convs.filter((c) => c.id !== conv.id);
       await store.del(conv.id).catch(() => {});
       if (state.currentId === conv.id) {
         state.currentId = state.convs[0]?.id || null;
         renderMessages();
+        syncComposer();
       }
       renderConvList();
     });
@@ -873,8 +868,7 @@ function renderConvList() {
 }
 
 $('btn-new-chat').addEventListener('click', () => {
-  if (state.streaming) return;
-  newConv();
+  newConv();            // 生成中也能新建：旧对话在后台继续生成，切回可见
   $('input-box').focus();
 });
 
@@ -884,8 +878,7 @@ const closeDrawer = () => $('view-app').classList.remove('drawer-open');
 $('btn-menu').addEventListener('click', openDrawer);
 $('sidebar-scrim').addEventListener('click', closeDrawer);
 $('btn-new-mobile').addEventListener('click', () => {
-  if (state.streaming) return;
-  newConv();            // newConv 内已收起抽屉
+  newConv();            // newConv 内已收起抽屉；生成中也能新建
   $('input-box').focus();
 });
 // 移动端：顶栏药丸开模型弹层、抽屉底部 Key 入口开设置
@@ -993,6 +986,7 @@ function buildMsgEl(m) {
     div.appendChild(body);
   } else {
     div.className = 'msg msg-assistant' + (m.kind === 'image' ? ' is-image' : '');
+    if (m._genid) div.dataset.genid = m._genid;     // 生成中消息的稳定定位 id（供 patchGen 续画）
     div.innerHTML = `<div class="msg-role">
         <span class="msg-role-glyph">${m.kind === 'image' ? '✦' : '∴'}</span>
         <span class="msg-role-name"></span>
@@ -1000,9 +994,19 @@ function buildMsgEl(m) {
     div.querySelector('.msg-role-name').textContent = m.model || 'assistant';
     const body = document.createElement('div');
     body.className = 'msg-body md';
-    body.innerHTML = mdRender(m.text || '');
-    const aImgs = msgAttachments(m).filter((a) => a.kind === 'image').map((a) => a.url);
-    if (aImgs.length) body.appendChild(buildImages(aImgs, true));
+    if (m.kind === 'image') {
+      if (m.text) body.innerHTML = mdRender(m.text);
+      const aImgs = msgAttachments(m).filter((a) => a.kind === 'image').map((a) => a.url);
+      if (aImgs.length) body.appendChild(buildImages(aImgs, true));
+      if (m._pending) {                              // 生图进行中：已出的图 + 转圈
+        const pend = document.createElement('div');
+        pend.className = 'gen-pending';
+        pend.innerHTML = `<div class="gen-rings"><span></span><span></span><span></span></div><div class="gen-pending-text">${aImgs.length ? '继续生成中…' : ('正在生成 ' + (m._meta || ''))}</div>`;
+        body.appendChild(pend);
+      }
+    } else {
+      body.innerHTML = mdRender(m.text || '') + (m._pending ? '<span class="stream-caret"></span>' : '');
+    }
     div.appendChild(body);
   }
   // 一行小字：用户消息=发送时间，助手消息=回复完成时间（流式中还没 createdAt，完成后再补）。
@@ -1236,37 +1240,42 @@ inputBox.addEventListener('keydown', (e) => {
 $('btn-send').addEventListener('click', onSend);
 
 function onSend() {
-  if (state.streaming) {
-    state.streaming.abort();          // 断开本地观看
-    // 登录态：生成是脱离连接的后台任务，仅 abort 本地连接掐不掉它 → 显式通知后端取消，
-    // 否则任务跑完前 done 一直为 false，下一条会被 409「上一条还在生成中」拦住。
-    const conv = currentConv();
-    if (conv && useServer()) {
-      fetch(`/api/conversations/${encodeURIComponent(conv.id)}/stream`, { method: 'DELETE' }).catch(() => {});
-    }
+  const cur = currentConv();
+  if (cur && state.gens.has(cur.id)) {
+    // 当前对话正在生成 → 停止它：abort 本地观看；登录态再通知后端取消（否则 409 挡下一条）。
+    // 只停「当前对话」，其它对话的生成不受影响（多对话并行的关键）。
+    state.gens.get(cur.id).ctrl.abort();
+    if (useServer()) fetch(`/api/conversations/${encodeURIComponent(cur.id)}/stream`, { method: 'DELETE' }).catch(() => {});
     return;
   }
   const text = inputBox.value.trim();
   if (!text && !state.attachments.length) return;
   if (!hasKey()) { openSettings(); return; }
   if (isImageMode() && !text) return; // 生图必须有描述
-
-  // 立刻占位，堵住异步窗口里的并发点击；内部会用真 controller 覆盖。
-  state.streaming = new AbortController();
   if (isImageMode()) sendImageGen(text);
   else sendChat(text);
 }
 
-function setSending(on) {
+// 发送按钮跟随「当前对话是否在生成」（多对话并行：切到哪个对话，按钮就反映哪个的状态）。
+function syncComposer() {
+  const cur = currentConv();
+  const gen = !!(cur && state.gens.has(cur.id));
   const btn = $('btn-send');
-  if (on) {
-    btn.textContent = '停止';
-    btn.classList.add('stop');
-  } else {
-    btn.classList.remove('stop');
-    btn.textContent = isImageMode() ? '生成' : '发送';
-    state.streaming = null;
-  }
+  if (gen) { btn.textContent = '停止'; btn.classList.add('stop'); }
+  else { btn.classList.remove('stop'); btn.textContent = isImageMode() ? '生成' : '发送'; }
+}
+// 生成中更新了某对话的消息数据后，刷新其 DOM —— 仅当正在看该对话时（否则只留数据，切回 renderMessages 会显示）。
+function patchGen(conv, aMsg) {
+  if (state.currentId !== conv.id) return;
+  const old = document.querySelector(`[data-genid="${aMsg._genid}"]`);
+  const neu = buildMsgEl(aMsg);
+  if (old) old.replaceWith(neu); else $('messages').appendChild(neu);
+  scrollToBottom(false);
+}
+// 中止所有对话的进行中生成（登出/会话失效时用）。仅断本地观看，后台任务由后端自行收尾。
+function abortAllGens() {
+  for (const g of state.gens.values()) { try { g.ctrl.abort(); } catch { /* ignore */ } }
+  state.gens.clear();
 }
 
 function pushUserMessage(conv, text) {
@@ -1289,8 +1298,7 @@ function pushUserMessage(conv, text) {
 function pushErrorMessage(conv, text) {
   const msg = { role: 'assistant', kind: 'error', text };
   conv.messages.push(msg);
-  $('messages').appendChild(buildMsgEl(msg));
-  scrollToBottom(true);
+  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(msg)); scrollToBottom(true); }
   persistConv(conv);
 }
 
@@ -1356,31 +1364,29 @@ async function pumpChatSse(res, onDelta) {
 
 async function sendChat(text) {
   const conv = currentConv() || newConv();
-  await ensureMessages(conv);
+  if (state.gens.has(conv.id)) return;              // 该对话已在生成（前端侧并发护栏）
   const model = currentModel();
-  const atts = state.attachments.slice();  // 发送前取（pushUserMessage 会清空 attachments）
-  pushUserMessage(conv, text);
+  const atts = state.attachments.slice();           // 发送前取（pushUserMessage 会清空 attachments）
+  const ctrl = new AbortController();
+  state.gens.set(conv.id, { ctrl });                // 同步占位：防并发双击 + 让按钮/切换立即反映
+  syncComposer();
+
+  await ensureMessages(conv);
+  pushUserMessage(conv, text);                      // 发送时一定在当前对话 → 直接乐观渲染 user 气泡
   await persistConv(conv);
 
-  const aMsg = { role: 'assistant', text: '', kind: 'chat', model };
+  // 进行中的 assistant 消息只存数据（_pending + _genid）；渲染统一走 buildMsgEl / patchGen，
+  // 因此生成期间切走/切回都不会写乱（切走只更新数据，切回 renderMessages 从数据重建）。
+  const aMsg = { role: 'assistant', text: '', kind: 'chat', model, _genid: newGenId(), _pending: true };
   conv.messages.push(aMsg);
-  const aEl = buildMsgEl(aMsg);
-  const aBody = aEl.querySelector('.msg-body');
-  aBody.innerHTML = '<span class="stream-caret"></span>';
-  $('messages').appendChild(aEl);
-  scrollToBottom(true);
-
-  const ctrl = new AbortController();
-  state.streaming = ctrl;
-  setSending(true);
+  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
 
   let lastRender = 0;
   const renderStream = (final) => {
     const now = Date.now();
     if (!final && now - lastRender < 90) return;
     lastRender = now;
-    aBody.innerHTML = mdRender(aMsg.text) + (final ? '' : '<span class="stream-caret"></span>');
-    scrollToBottom(false);
+    patchGen(conv, aMsg);                            // 只在正看该对话时刷新其 DOM
   };
 
   try {
@@ -1411,24 +1417,26 @@ async function sendChat(text) {
 
     await pumpChatSse(res, (d) => { aMsg.text += d; renderStream(false); });
     if (!aMsg.text) aMsg.text = '（空响应）';
+    aMsg._pending = false;
     aMsg.createdAt = Date.now();          // 回复完成时间
-    renderStream(true);
-    setMsgTime(aEl, aMsg.createdAt);
+    patchGen(conv, aMsg);
   } catch (err) {
-    conv.messages.pop();
-    aEl.remove();
-    if (err.name !== 'AbortError') {
+    const idx = conv.messages.indexOf(aMsg);
+    if (idx >= 0) conv.messages.splice(idx, 1);
+    if (err.name === 'AbortError') {
+      if (aMsg.text) {                    // 手动停止：保留已生成部分
+        aMsg._pending = false;
+        aMsg.text += '\n\n*（已手动停止）*';
+        aMsg.createdAt = Date.now();
+        conv.messages.push(aMsg);
+      }
+    } else {
       pushErrorMessage(conv, err.message);
-    } else if (aMsg.text) {
-      aMsg.createdAt = Date.now();        // 手动停止：以停止时刻为完成时间
-      conv.messages.push(aMsg);
-      aMsg.text += '\n\n*（已手动停止）*';
-      aEl.querySelector('.msg-body').innerHTML = mdRender(aMsg.text);
-      setMsgTime(aEl, aMsg.createdAt);
-      $('messages').appendChild(aEl);
     }
+    if (state.currentId === conv.id) renderMessages();
   } finally {
-    setSending(false);
+    state.gens.delete(conv.id);
+    if (state.currentId === conv.id) syncComposer();
     await persistConv(conv);
   }
 }
@@ -1437,28 +1445,18 @@ async function sendChat(text) {
 
 /** 宽容地解析流式生图 SSE：兼容官方 image_generation.partial_image / image_edit.* 事件，
  *  也接住各种代理自创的 {b64_json} / {data:[{b64_json|url}]} 形态。 */
-async function readImageSse(res, pendingEl) {
+async function readImageSse(res, onUpdate) {
   const finalImages = [];   // 最终图（dataURL 或 http url）；组图会有多张
   let lastPartialB64 = null;
   let revised = '';
   let mime = 'image/png';
 
-  const previewWrap = pendingEl.querySelector('.msg-body');
-  let previewImg = null;
-  const showPartial = (dataUri) => {
-    if (!previewImg) {
-      previewImg = document.createElement('img');
-      previewImg.className = 'gen-partial';
-      previewWrap.appendChild(previewImg);
-      const txt = pendingEl.querySelector('.gen-pending-text');
-      if (txt) txt.firstChild.textContent = '逐步成形中 ';
-    }
-    previewImg.src = dataUri;
-    scrollToBottom(false);
-  };
+  const emit = () => { if (onUpdate) onUpdate(finalImages.slice(), revised); };
   const pushImg = (b64, url) => {
-    if (b64) { finalImages.push(`data:${mime};base64,${b64}`); showPartial(`data:${mime};base64,${b64}`); }
-    else if (url) { finalImages.push(url); showPartial(url); }
+    if (b64) finalImages.push(`data:${mime};base64,${b64}`);
+    else if (url) finalImages.push(url);
+    else return;
+    emit();   // 逐张到达即回调（调用方据此更新数据 + 逐张显示）
   };
 
   const handleEvent = (j) => {
@@ -1475,12 +1473,8 @@ async function readImageSse(res, pendingEl) {
     const b64 = typeof j.b64_json === 'string' ? j.b64_json : '';
     const url = typeof j.url === 'string' ? j.url : '';
     if (!b64 && !url) return;
-    // 渐进预览（partial_image，非 succeeded）：只刷预览、不算最终
-    if (type.includes('partial') && !type.includes('succeeded')) {
-      if (b64) { lastPartialB64 = b64; showPartial(`data:${mime};base64,${b64}`); }
-      else if (url) showPartial(url);
-      return;
-    }
+    // 渐进预览（partial_image，非 succeeded；后端已过滤，一般收不到）：只留兜底、不算最终
+    if (type.includes('partial') && !type.includes('succeeded')) { if (b64) lastPartialB64 = b64; return; }
     pushImg(b64, url);   // partial_succeeded（火山组图一张）/ completed（gpt-image）/ 裸最终
   };
 
@@ -1515,7 +1509,7 @@ async function readImageSse(res, pendingEl) {
 async function sendImageGen(prompt) {
   if (!prompt) return;
   const conv = currentConv() || newConv();
-  await ensureMessages(conv);
+  if (state.gens.has(conv.id)) return;    // 该对话已在生成（ensureMessages 移到下方 gens 占位之后）
   const model = currentModel();
   const caps = DOUBAO_CAPS[model];
   let size = $('size-select').value;
@@ -1538,35 +1532,26 @@ async function sendImageGen(prompt) {
     promptMode = (caps.fast && $('promptmode-select').value === 'fast') ? 'fast' : 'standard';
     if (count > 1) sizeLabel += ` · ×${count}`;
   }
+  const ctrl = new AbortController();
+  state.gens.set(conv.id, { ctrl });                // 同步占位：防并发双击 + 让按钮/切换立即反映
+  syncComposer();
+
+  await ensureMessages(conv);
   const userMsg = pushUserMessage(conv, prompt);
   // 生图取图片附件作参考图（文本文件忽略）：gpt 走 /edits 改图；豆包走图生图/多图融合/图生组图。
   const refImages = (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
   if (!caps && refImages.length && !NATIVE_SIZES.has(size)) size = '1024x1024';   // 仅 gpt /edits 尺寸限制
   await persistConv(conv);
 
-  const pendingEl = document.createElement('div');
-  pendingEl.className = 'msg msg-assistant is-image';
-  pendingEl.innerHTML = `
-    <div class="msg-role"><span class="msg-role-glyph">✦</span><span class="msg-role-name"></span></div>
-    <div class="msg-body">
-      <div class="gen-pending">
-        <div class="gen-rings"><span></span><span></span><span></span></div>
-        <div class="gen-pending-text">正在生成 <span class="mono"></span> · <span class="gen-pending-timer">0s</span></div>
-      </div>
-    </div>`;
-  pendingEl.querySelector('.msg-role-name').textContent = model;
-  pendingEl.querySelector('.gen-pending-text .mono').textContent =
-    (!caps && refImages.length) ? `${size} · 按图改图` : sizeLabel;
-  $('messages').appendChild(pendingEl);
-  scrollToBottom(true);
-
   const t0 = Date.now();
-  const timerEl = pendingEl.querySelector('.gen-pending-timer');
-  const timer = setInterval(() => { timerEl.textContent = `${Math.round((Date.now() - t0) / 1000)}s`; }, 1000);
-
-  const ctrl = new AbortController();
-  state.streaming = ctrl;
-  setSending(true);
+  // 进行中的生图消息只存数据（_pending + images[] 逐张累积）；渲染统一走 buildMsgEl / patchGen。
+  const aMsg = {
+    role: 'assistant', kind: 'image', model, text: '', images: [],
+    _genid: newGenId(), _pending: true,
+    _meta: (!caps && refImages.length) ? `${size} · 按图改图` : sizeLabel,
+  };
+  conv.messages.push(aMsg);
+  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
 
   try {
     // 登录态：参考图先传 /api/blobs 拿 hash（refs:[hash]）；keyonly：直接发 dataURL。流式/回退由后端处理。
@@ -1583,14 +1568,15 @@ async function sendImageGen(prompt) {
       throw new Error(formatApiError(res.status, await res.text()));
     }
 
-    let images = [];
     let revised = '';
     const ctype = res.headers.get('content-type') || '';
 
     if (ctype.includes('event-stream')) {
-      const got = await readImageSse(res, pendingEl);
-      images = got.images;
-      revised = got.revised;
+      const got = await readImageSse(res, (imgs, rev) => {   // 逐张到达：更新数据 + 刷新（仅当前对话）
+        aMsg.images = imgs; if (rev) revised = rev;
+        patchGen(conv, aMsg);
+      });
+      aMsg.images = got.images; revised = got.revised || revised;
     } else {
       const bodyText = await res.text();
       let json;
@@ -1603,31 +1589,30 @@ async function sendImageGen(prompt) {
         );
       }
       const items = json.data || [];
-      images = items
+      aMsg.images = items
         .map((d) => d.b64_json ? `data:image/png;base64,${d.b64_json}` : d.url)
         .filter(Boolean);
       revised = items[0]?.revised_prompt || '';
-      if (!images.length) throw new Error(`响应里没有图片：${bodyText.slice(0, 300)}`);
+      if (!aMsg.images.length) throw new Error(`响应里没有图片：${bodyText.slice(0, 300)}`);
     }
 
     const secs = Math.round((Date.now() - t0) / 1000);
-    const msg = {
-      role: 'assistant', kind: 'image', model,
-      text: revised ? `*${revised}*` : '',
-      images,
-      meta: `${sizeLabel} · ${secs}s`,
-      createdAt: Date.now(),              // 生图完成时间
-    };
-    conv.messages.push(msg);
-    pendingEl.remove();
-    $('messages').appendChild(buildMsgEl(msg));
-    scrollToBottom(true);
+    aMsg.text = revised ? `*${revised}*` : '';
+    aMsg.meta = `${sizeLabel} · ${secs}s`;
+    aMsg._pending = false;
+    aMsg.createdAt = Date.now();          // 生图完成时间
+    patchGen(conv, aMsg);
   } catch (err) {
-    pendingEl.remove();
+    const idx = conv.messages.indexOf(aMsg);
+    if (idx >= 0) conv.messages.splice(idx, 1);
     if (err.name !== 'AbortError') pushErrorMessage(conv, err.message);
+    else if (aMsg.images.length) {        // 手动停止但已出了图 → 保留
+      aMsg._pending = false; aMsg.createdAt = Date.now(); conv.messages.push(aMsg);
+    }
+    if (state.currentId === conv.id) renderMessages();
   } finally {
-    clearInterval(timer);
-    setSending(false);
+    state.gens.delete(conv.id);
+    if (state.currentId === conv.id) syncComposer();
     await persistConv(conv);
   }
 }
