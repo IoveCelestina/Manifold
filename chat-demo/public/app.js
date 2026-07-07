@@ -297,7 +297,7 @@ async function reconnectInflight(conv) {
   // 临时占位消息（进行中）；跑完从 DB 重拉规范状态覆盖。数据驱动 → 期间可自由切换对话。
   const aMsg = { role: 'assistant', kind, model: '', text: '', images: [], _genid: newGenId(), _pending: true, _meta: '接上后台生成…' };
   conv.messages.push(aMsg);
-  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
+  patchGen(conv, aMsg);   // 首次渲染（数据驱动、增量；不在当前对话则跳过）
 
   let res;
   try {
@@ -1007,29 +1007,31 @@ function buildMsgEl(m) {
   return div;
 }
 
+// 单张图片项（.msg-img-wrap）。buildImages 与 patchGen 增量追加共用 —— 已解码的图不被重建。
+function buildImageItem(url, i, downloadable) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-img-wrap';
+  const img = document.createElement('img');
+  img.loading = 'lazy';       // 只加载滚动到可见的图，避免一次性解码整轮对话的大图（4K 图解码极耗内存）
+  img.decoding = 'async';     // 异步解码，不阻塞主线程
+  img.alt = `图片 ${i + 1}`;
+  img.src = url;              // src 在 loading/decoding 之后设，确保懒加载生效
+  img.addEventListener('click', () => openLightbox(url));
+  wrap.appendChild(img);
+  if (downloadable) {
+    const a = document.createElement('a');
+    a.className = 'img-download';
+    a.textContent = '下载';
+    a.href = url;
+    a.download = `manifold-${Date.now()}-${i + 1}.png`;
+    wrap.appendChild(a);
+  }
+  return wrap;
+}
 function buildImages(urls, downloadable) {
   const box = document.createElement('div');
   box.className = 'msg-images';
-  urls.forEach((u, i) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg-img-wrap';
-    const img = document.createElement('img');
-    img.loading = 'lazy';       // 只加载滚动到可见的图，避免一次性解码整轮对话的大图（4K 图解码极耗内存）
-    img.decoding = 'async';     // 异步解码，不阻塞主线程
-    img.alt = `图片 ${i + 1}`;
-    img.src = u;                // src 在 loading/decoding 之后设，确保懒加载生效
-    img.addEventListener('click', () => openLightbox(u));
-    wrap.appendChild(img);
-    if (downloadable) {
-      const a = document.createElement('a');
-      a.className = 'img-download';
-      a.textContent = '下载';
-      a.href = u;
-      a.download = `manifold-${Date.now()}-${i + 1}.png`;
-      wrap.appendChild(a);
-    }
-    box.appendChild(wrap);
-  });
+  urls.forEach((u, i) => box.appendChild(buildImageItem(u, i, downloadable)));
   return box;
 }
 
@@ -1258,10 +1260,37 @@ function syncComposer() {
 // 生成中更新了某对话的消息数据后，刷新其 DOM —— 仅当正在看该对话时（否则只留数据，切回 renderMessages 会显示）。
 function patchGen(conv, aMsg) {
   if (state.currentId !== conv.id) return;
-  const old = document.querySelector(`[data-genid="${aMsg._genid}"]`);
-  const neu = buildMsgEl(aMsg);
-  if (old) old.replaceWith(neu); else $('messages').appendChild(neu);
+  const el = document.querySelector(`[data-genid="${aMsg._genid}"]`);
+  if (!el) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); return; }  // 首次插入
+  updateGenEl(el, aMsg);                                                                    // 之后增量
   scrollToBottom(false);
+}
+// 增量更新一条进行中/刚完成的助手消息 DOM：chat 只改正文；image 只「追加」新到的图并在收尾去转圈。
+// 避免每次流式刷新重建整条，尤其避免组图把已解码的 4K 图反复重建（旧写法 O(n²)）。
+function updateGenEl(el, m) {
+  const body = el.querySelector('.msg-body');
+  if (!body) return;
+  if (m.kind !== 'image') {
+    body.innerHTML = mdRender(m.text || '') + (m._pending ? '<span class="stream-caret"></span>' : '');
+  } else {
+    const pend = body.querySelector('.gen-pending');
+    const urls = m.images || [];
+    if (urls.length) {
+      let box = body.querySelector('.msg-images');
+      if (!box) { box = document.createElement('div'); box.className = 'msg-images'; body.insertBefore(box, pend); }
+      for (let i = box.children.length; i < urls.length; i++) box.appendChild(buildImageItem(urls[i], i, true));
+    }
+    if (!m._pending) {                       // 完成：去转圈；有修订文案补在最前（只补一次）
+      if (pend) pend.remove();
+      if (m.text && !body.querySelector('.gen-revised')) {
+        const p = document.createElement('div');
+        p.className = 'gen-revised md';
+        p.innerHTML = mdRender(m.text);
+        body.insertBefore(p, body.firstChild);
+      }
+    }
+  }
+  if (m.createdAt) setMsgTime(el, m.createdAt);
 }
 // 起一个生成：建 AbortController、登记到该对话（供停止/切换/并发护栏用）、刷新按钮态。返回 ctrl。
 function beginGen(conv) {
@@ -1375,68 +1404,29 @@ async function pumpChatSse(res, onDelta) {
   for (const line of buf.split('\n')) if (line.trim()) handleLine(line);
 }
 
-async function sendChat(text) {
-  const conv = currentConv() || newConv();
-  if (state.gens.has(conv.id)) return;              // 该对话已在生成（前端侧并发护栏）
-  const model = currentModel();
-  const atts = state.attachments.slice();           // 发送前取（pushUserMessage 会清空 attachments）
-  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
-
-  await ensureMessages(conv);
-  pushUserMessage(conv, text);                      // 发送时一定在当前对话 → 直接乐观渲染 user 气泡
-  await persistConv(conv);
-
-  // 进行中的 assistant 消息只存数据（_pending + _genid）；渲染统一走 buildMsgEl / patchGen，
-  // 因此生成期间切走/切回都不会写乱（切走只更新数据，切回 renderMessages 从数据重建）。
-  const aMsg = { role: 'assistant', text: '', kind: 'chat', model, _genid: newGenId(), _pending: true };
+// 统一 sendChat/sendImageGen 的「生成生命周期」：占位消息 → 流式刷新 → 成功/手动停止/错误收尾。
+// 三处（含 reconnectInflight）曾各写一遍，现收成一处。调用方先同步 beginGen(conv) 拿 ctrl（防并发），再传：
+//   aMsg     进行中的占位消息（chat 累积 .text、image 累积 .images）
+//   doRequest(signal) → Response
+//   runReader(res, repaint) 把响应落到 aMsg，每有进展调 repaint()；返回时 aMsg 即最终数据
+async function runGen(conv, aMsg, ctrl, doRequest, runReader) {
   conv.messages.push(aMsg);
-  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
-
-  let lastRender = 0;
-  const renderStream = () => {
-    const now = Date.now();
-    if (now - lastRender < 90) return;
-    lastRender = now;
-    patchGen(conv, aMsg);                            // 只在正看该对话时刷新其 DOM
-  };
-
+  patchGen(conv, aMsg);                                // 首次渲染（不在当前对话则跳过；不存在则插入）
   try {
-    let res;
-    if (useServer()) {
-      // 登录态：附件先传 /api/blobs 拿 hash，后端落库 + 组装上下文（发 {text, attachments:[{hash,name}]}）
-      const attachments = await Promise.all(atts.map(async (a) => ({
-        hash: a.kind === 'file' ? await uploadText(a.text, a.mime) : await uploadDataUrl(a.dataUrl),
-        name: a.name || '',
-      })));
-      res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/messages`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, text, attachments }), signal: ctrl.signal,
-      });
-    } else {
-      // keyonly：前端拼上下文（不落后端库）
-      res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/messages`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: buildApiMessages(conv) }), signal: ctrl.signal,
-      });
-    }
-
+    const res = await doRequest(ctrl.signal);
     if (res.status === 409) throw new Error('上一条还在生成中，请稍候');
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(formatApiError(res.status, errText));
-    }
-
-    await pumpChatSse(res, (d) => { aMsg.text += d; renderStream(); });
-    if (!aMsg.text) aMsg.text = '（空响应）';
+    if (!res.ok) throw new Error(formatApiError(res.status, await res.text()));
+    await runReader(res, () => patchGen(conv, aMsg));
     aMsg._pending = false;
-    aMsg.createdAt = Date.now();          // 回复完成时间
+    aMsg.createdAt = Date.now();
     patchGen(conv, aMsg);
   } catch (err) {
     dropMsg(conv, aMsg);
+    const kept = aMsg.kind === 'image' ? aMsg.images.length : aMsg.text;
     if (err.name === 'AbortError') {
-      if (aMsg.text) {                    // 手动停止：保留已生成部分
+      if (kept) {                                       // 手动停止：保留已生成部分
         aMsg._pending = false;
-        aMsg.text += '\n\n*（已手动停止）*';
+        if (aMsg.kind !== 'image') aMsg.text += '\n\n*（已手动停止）*';
         aMsg.createdAt = Date.now();
         conv.messages.push(aMsg);
       }
@@ -1448,6 +1438,41 @@ async function sendChat(text) {
     endGen(conv);
     await persistConv(conv);
   }
+}
+
+async function sendChat(text) {
+  const conv = currentConv() || newConv();
+  if (state.gens.has(conv.id)) return;              // 该对话已在生成（前端侧并发护栏）
+  const model = currentModel();
+  const atts = state.attachments.slice();           // 发送前取（pushUserMessage 会清空 attachments）
+  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
+
+  await ensureMessages(conv);
+  pushUserMessage(conv, text);                      // 发送时一定在当前对话 → 直接乐观渲染 user 气泡
+  await persistConv(conv);
+
+  const aMsg = { role: 'assistant', text: '', kind: 'chat', model, _genid: newGenId(), _pending: true };
+  const doRequest = (signal) => useServer()
+    ? Promise.all(atts.map(async (a) => ({           // 登录态：附件先传 /api/blobs 拿 hash，后端落库+组装上下文
+        hash: a.kind === 'file' ? await uploadText(a.text, a.mime) : await uploadDataUrl(a.dataUrl),
+        name: a.name || '',
+      }))).then((attachments) => fetch(`/api/conversations/${encodeURIComponent(conv.id)}/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, text, attachments }), signal,
+      }))
+    : fetch(`/api/conversations/${encodeURIComponent(conv.id)}/messages`, {   // keyonly：前端拼上下文
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages: buildApiMessages(conv) }), signal,
+      });
+  const runReader = async (res, repaint) => {
+    let last = 0;
+    await pumpChatSse(res, (d) => {
+      aMsg.text += d;
+      const now = Date.now(); if (now - last > 90) { last = now; repaint(); }
+    });
+    if (!aMsg.text) aMsg.text = '（空响应）';
+  };
+  await runGen(conv, aMsg, ctrl, doRequest, runReader);
 }
 
 /* —— 生图 —— */
@@ -1551,75 +1576,45 @@ async function sendImageGen(prompt) {
   await persistConv(conv);
 
   const t0 = Date.now();
-  // 进行中的生图消息只存数据（_pending + images[] 逐张累积）；渲染统一走 buildMsgEl / patchGen。
   const aMsg = {
     role: 'assistant', kind: 'image', model, text: '', images: [],
     _genid: newGenId(), _pending: true,
     _meta: (!caps && refImages.length) ? `${size} · 按图改图` : sizeLabel,
   };
-  conv.messages.push(aMsg);
-  if (state.currentId === conv.id) { $('messages').appendChild(buildMsgEl(aMsg)); scrollToBottom(true); }
-
-  try {
-    // 登录态：参考图先传 /api/blobs 拿 hash（refs:[hash]）；keyonly：直接发 dataURL。流式/回退由后端处理。
+  const doRequest = async (signal) => {
+    // 登录态：参考图先传 /api/blobs 拿 hash（refs:[hash]）；keyonly：直接发 dataURL
     const refs = useServer() && refImages.length ? await Promise.all(refImages.map(uploadDataUrl)) : refImages;
-    const res = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}/images`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    return fetch(`/api/conversations/${encodeURIComponent(conv.id)}/images`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt, size, quality, output_format: outputFormat, refs, count, web_search: webSearch, prompt_mode: promptMode }),
-      signal: ctrl.signal,
+      signal,
     });
-
-    if (res.status === 409) throw new Error('上一条还在生成中，请稍候');
-    if (!res.ok) {
-      throw new Error(formatApiError(res.status, await res.text()));
-    }
-
+  };
+  const runReader = async (res, repaint) => {
     let revised = '';
     const ctype = res.headers.get('content-type') || '';
-
     if (ctype.includes('event-stream')) {
-      const got = await readImageSse(res, (imgs, rev) => {   // 逐张到达：更新数据 + 刷新（仅当前对话）
-        aMsg.images = imgs; if (rev) revised = rev;
-        patchGen(conv, aMsg);
-      });
+      const got = await readImageSse(res, (imgs, rev) => { aMsg.images = imgs; if (rev) revised = rev; repaint(); });
       aMsg.images = got.images; revised = got.revised || revised;
     } else {
       const bodyText = await res.text();
       let json;
-      try {
-        json = JSON.parse(bodyText);
-      } catch {
+      try { json = JSON.parse(bodyText); }
+      catch {
         throw new Error(
           `响应 JSON 解析失败（共 ${bodyText.length} 字符，疑似被截断）\n` +
           `头部：${bodyText.slice(0, 160)}\n…\n尾部：${bodyText.slice(-160)}`
         );
       }
       const items = json.data || [];
-      aMsg.images = items
-        .map((d) => d.b64_json ? `data:image/png;base64,${d.b64_json}` : d.url)
-        .filter(Boolean);
+      aMsg.images = items.map((d) => d.b64_json ? `data:image/png;base64,${d.b64_json}` : d.url).filter(Boolean);
       revised = items[0]?.revised_prompt || '';
       if (!aMsg.images.length) throw new Error(`响应里没有图片：${bodyText.slice(0, 300)}`);
     }
-
-    const secs = Math.round((Date.now() - t0) / 1000);
     aMsg.text = revised ? `*${revised}*` : '';
-    aMsg.meta = `${sizeLabel} · ${secs}s`;
-    aMsg._pending = false;
-    aMsg.createdAt = Date.now();          // 生图完成时间
-    patchGen(conv, aMsg);
-  } catch (err) {
-    dropMsg(conv, aMsg);
-    if (err.name !== 'AbortError') pushErrorMessage(conv, err.message);
-    else if (aMsg.images.length) {        // 手动停止但已出了图 → 保留
-      aMsg._pending = false; aMsg.createdAt = Date.now(); conv.messages.push(aMsg);
-    }
-    if (state.currentId === conv.id) renderMessages();
-  } finally {
-    endGen(conv);
-    await persistConv(conv);
-  }
+    aMsg.meta = `${sizeLabel} · ${Math.round((Date.now() - t0) / 1000)}s`;
+  };
+  await runGen(conv, aMsg, ctrl, doRequest, runReader);
 }
 
 function formatApiError(status, bodyText) {
