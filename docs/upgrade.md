@@ -52,6 +52,12 @@ image: weishaw/sub2api@sha256:f242f8504c9cb3c89f2a9531b1491a83d9bc7f3648a649c2c3
 
 ## sub2api 升级
 
+> 🤖 **一键脚本**：`./scripts/update-sub2api.sh --deploy`（PowerShell 用 `./scripts/update-sub2api.ps1 -Deploy`）
+> 自动完成：查最新版 → 改 compose digest → commit + push → 生产 git pull → pg_dump 兜底 → pull + force-recreate → 等 healthy + 健康检查。
+> 只想看有没有新版用 `--check`；升级/回退到指定版本用 `--version X.Y.Z`。
+> 脚本只做机械步骤，**release notes 还是要人扫一眼**（脚本会打印链接）——尤其注意 schema migration。
+> 下面的手动流程留作备查/排错。
+
 **影响范围**：sub2api 容器重启，约 10-30s 服务中断（caddy 反代会 502）。数据库 schema 可能变。
 
 **准备**：
