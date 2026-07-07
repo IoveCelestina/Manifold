@@ -1157,6 +1157,16 @@ async function adjustUserBalance(uid: number, amountUsd: number, operation: 'sub
   if (!r.ok) throw new Error(j?.error?.message || j?.message || `余额接口 HTTP ${r.status}`);
 }
 
+// 查某用户当前余额（USD）。用于豆包扣费前预检：sub2api 0.1.145 起「余额不足」被包装成 500 且
+// 不返回具体消息，无法从响应区分「余额不足」与真正的服务错误，故先查余额、够才扣、不足直接明确提示。
+async function doubaoUserBalance(uid: number): Promise<number> {
+  const r = await fetch(`${BASE}/api/v1/admin/users/${uid}`, { headers: { 'x-api-key': SUB2API_ADMIN_KEY } });
+  let j: any = null;
+  try { j = await r.json(); } catch { /* 空 body */ }
+  if (!r.ok) throw new Error(j?.message || `查余额 HTTP ${r.status}`);
+  return Number(j?.data?.balance ?? NaN);
+}
+
 // 生图：登录态落 user 消息 + 结果存 blob 落 kind=image，并走后台任务（脱离连接、可刷新重连）；
 // keyonly（无 uid）保持原直连代理（dataURL 参考图、不落库）。上游 generations/edits，流式绕 CF 100s。
 async function apiImages(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
@@ -1197,14 +1207,25 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
     // （balance 不能为负），此时不落 user 消息、不出图。出图后按实际成功张数退差额。
     if (doubao) {
       doubaoImgCount = doubaoCount(body.count, refs.length);
-      const idemKey = 'dbimg_' + crypto.randomBytes(8).toString('hex');
       const price = doubaoPrice(model);
+      const need = price * doubaoImgCount;
+      // 先查余额：0.1.145 起 subtract 对「余额不足」返回 500 internal error（不带具体文字），
+      // 无法从响应区分「余额不足」与真正服务错误，故扣费前先查、不足直接明确提示充值。
       try {
-        await adjustUserBalance(uid, price * doubaoImgCount, 'subtract', idemKey, `豆包生图 ${model} ×${doubaoImgCount}`);
+        const bal = await doubaoUserBalance(uid);
+        if (Number.isFinite(bal) && bal < need) {
+          sendJson(res, 402, { error: { message: `余额不足（本次需 $${need.toFixed(2)}，当前余额 $${bal.toFixed(2)}），请充值后再试` } });
+          return;
+        }
+      } catch { /* 查余额失败不阻塞，继续走扣费（扣费自身仍有余额闸门）*/ }
+      const idemKey = 'dbimg_' + crypto.randomBytes(8).toString('hex');
+      try {
+        await adjustUserBalance(uid, need, 'subtract', idemKey, `豆包生图 ${model} ×${doubaoImgCount}`);
         doubaoCharge = { idemKey, count: doubaoImgCount, price };
       } catch (e: any) {
         const msg = String(e?.message || '');
-        const insufficient = /negative|不足|insufficient/i.test(msg);
+        // 0.1.145 余额不足 = 500 "internal error"；先查已挡住绝大多数，这里把它一并当余额不足兜底。
+        const insufficient = /negative|不足|insufficient|internal error/i.test(msg);
         sendJson(res, insufficient ? 402 : 502, { error: { message: insufficient ? '余额不足，请充值后再试' : ('扣费失败：' + msg) } });
         return;
       }
