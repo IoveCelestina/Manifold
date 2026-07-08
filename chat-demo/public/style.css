@@ -440,9 +440,10 @@ input:focus, textarea:focus, select:focus {
 @keyframes caret-blink { 50% { opacity: 0; } }
 
 /* 消息中的图片 */
-.msg-images { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
-.msg-img-wrap { position: relative; }
+.msg-images { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin-top: 10px; }
+.msg-img-wrap { display: inline-grid; flex: 0 0 auto; max-width: 100%; }
 .msg-images img {
+  grid-area: 1 / 1;
   max-width: 320px; max-height: 320px;
   min-height: 120px;                 /* 占位高度：加载前撑开，让屏外图真正不可见 → loading=lazy 生效 */
   background: var(--hairline);        /* 加载中的骨架底色 */
@@ -453,7 +454,11 @@ input:focus, textarea:focus, select:focus {
 }
 .msg-user .msg-images img { max-width: 180px; max-height: 180px; }
 .img-download {
-  position: absolute; right: 8px; bottom: 8px;
+  grid-area: 1 / 1;
+  justify-self: end;
+  align-self: end;
+  margin: 0 8px 8px 0;
+  z-index: 1;
   font-size: 11.5px;
   padding: 4px 10px;
   border-radius: 6px;
