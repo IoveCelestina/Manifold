@@ -57,8 +57,8 @@ services:
 
   # ─── 前台网关：sub2api（后续替换为 Manifold 重构镜像） ──────
   sub2api:
-    # sub2api 0.1.149 (pulled 2026-07-10)
-    image: weishaw/sub2api@sha256:2f591cdac4a88b8960ce822fffc1af16b0eb2725a0d7f3a26af897122770be6e
+    # sub2api 0.1.151 (pulled 2026-07-10)
+    image: weishaw/sub2api@sha256:2ca591c2af97eb0e2797cfc7fb7bd587194d94cebdac76f73d677eeab1d4d6c8
     container_name: manifold-sub2api
     restart: unless-stopped
     extra_hosts:
