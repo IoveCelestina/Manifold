@@ -35,5 +35,12 @@ test("server-renders the complete algorithm article", async () => {
   assert.match(html, /STL/);
   assert.match(html, /数据结构/);
   assert.match(html, /计算几何/);
+  assert.match(html, /<h2 id="背包">背包<\/h2>/);
+  const lcsSection = html.slice(
+    html.indexOf("LCS(最长公共子序列)</h2>"),
+    html.indexOf('<h2 id="背包">'),
+  );
+  assert.doesNotMatch(lcsSection, /katex-error/);
+  assert.doesNotMatch(html, /## 背包/);
   assert.doesNotMatch(html, /\[TOC\]/);
 });

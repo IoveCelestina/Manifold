@@ -5949,14 +5949,14 @@ for(int i = 1;i<=cnt;++i){
 
 ## LCS(最长公共子序列)
 
-$$\begin{align*}
+$$
 C[i,j] = \begin{cases}
 0 & \text{if } i=0 \text{ or } j=0 \\
 C[i-1,j-1] + 1 & \text{if } i > 0 \text{ and } j > 0 \text{ and } x_i = y_j \\
 \max(C[i-1,j], C[i,j-1]) & \text{if } i > 0 \text{ and } j > 0 \text{ and } x_i 
 \neq  y_j
 \end{cases}
-\end{align*}$$
+$$
 
 
 
