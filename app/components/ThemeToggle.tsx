@@ -7,7 +7,8 @@ export function ThemeToggle() {
   useEffect(() => {
     const next = window.localStorage.getItem("blog-theme") === "light";
     document.documentElement.dataset.theme = next ? "light" : "dark";
-    setLight(next);
+    const frame = window.requestAnimationFrame(() => setLight(next));
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   function toggle() {

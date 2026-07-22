@@ -4,14 +4,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://blog.zstuacm.xyz"),
-  title: { default: "ZSTU ACM Notes", template: "%s · ZSTU ACM Notes" },
-  description: "算法竞赛笔记、代码模板与解题方法的长期知识库。",
+  title: { default: "ZSTUACM Blog", template: "%s · ZSTUACM Blog" },
+  description: "记录技术实践、项目复盘、算法竞赛、阅读与生活的个人博客。",
   openGraph: {
-    title: "ZSTU ACM Notes",
-    description: "把复杂算法，整理成随时可用的板子。",
+    title: "ZSTUACM Blog",
+    description: "写代码，也写下代码之外的事。",
     type: "website",
     locale: "zh_CN",
-    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "算法竞赛板子 · ZSTU ACM Notes" }],
+    images: [{ url: "/og.svg", width: 1200, height: 630, alt: "写代码，也写下代码之外的事 · ZSTUACM Blog" }],
   },
   twitter: { card: "summary_large_image", images: ["/og.png"] },
 };
