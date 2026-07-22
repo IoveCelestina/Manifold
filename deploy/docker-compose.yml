@@ -172,6 +172,28 @@ services:
   # 本机可直连 OpenAI/Anthropic/Google，无需出网代理。
   # sub2api 经 manifold-upstream 网络直接出网调厂商 API。
 
+  # ─── 个人博客（源码在 ../blog） ────────────────────────────
+  blog:
+    build:
+      context: ../blog
+    image: manifold/blog:local
+    container_name: manifold-blog
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      VINEXT_TRUSTED_HOSTS: blog.zstuacm.xyz
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - manifold-edge
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
   # ─── chat-demo（从旧机迁移恢复，源码在 ../chat-demo） ──────────
   chat-demo:
     build:
