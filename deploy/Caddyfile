@@ -1,5 +1,5 @@
 # Manifold Caddy 反代配置（源站在 Cloudflare 之后）
-# 改完热加载: docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+# 直接编辑可热加载；git pull 替换文件后应 force-recreate caddy，避免 bind mount 仍引用旧 inode。
 
 {
 	email {$ACME_EMAIL:Taohu0122@qq.com}

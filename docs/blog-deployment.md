@@ -21,7 +21,7 @@ git pull --ff-only
 cd deploy
 docker compose build blog
 docker compose up -d blog
-docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+docker compose up -d --force-recreate caddy
 docker compose ps blog caddy
 ```
 
@@ -43,9 +43,11 @@ cd deploy
 docker compose up -d --build blog
 ```
 
-如果只改了 `deploy/Caddyfile`，无需重启整个栈：
+如果通过 `git pull` 更新了 `deploy/Caddyfile`，只需重建 Caddy，不必重启其他服务：
 
 ```bash
 cd deploy
-docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+docker compose up -d --force-recreate caddy
 ```
+
+原因是 Git 可能通过替换文件 inode 完成更新，旧容器的只读 bind mount 仍指向更新前的文件；单纯执行 `caddy reload` 不一定会读取到新配置。
