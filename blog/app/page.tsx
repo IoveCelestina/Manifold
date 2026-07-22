@@ -90,7 +90,7 @@ export default function Home() {
       </section>
 
       <footer className="site-footer shell">
-        <div className="brand"><span className="brand-mark">Z</span><span>ZSTUACM <small>/ BLOG</small></span></div>
+        <div className="brand"><span className="brand-mark">C</span><span>CLESTIANA <small>/ BLOG</small></span></div>
         <p>记录学习、构建与生活。</p>
       </footer>
     </main>

@@ -18,7 +18,7 @@ test("server-renders the blog home page", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /ZSTUACM/);
+  assert.match(html, /CLESTIANA/);
   assert.match(html, /这里是我的个人博客/);
   assert.match(html, /技术札记/);
   assert.match(html, /随手记录/);
