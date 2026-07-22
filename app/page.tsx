@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { ScrollReveal } from "./components/ScrollReveal";
 import { SiteHeader } from "./components/SiteHeader";
 import { post } from "./lib/post";
 
@@ -13,6 +14,7 @@ export default function Home() {
   return (
     <main>
       <SiteHeader />
+      <ScrollReveal />
       <section className="hero shell personal-hero">
         <div className="hero-copy reveal">
           <p className="eyebrow"><span className="status-dot" /> PERSONAL BLOG</p>
@@ -49,11 +51,11 @@ export default function Home() {
       </section>
 
       <section className="latest-section shell" id="latest">
-        <div className="section-heading">
+        <div className="section-heading" data-scroll-reveal>
           <div><p className="eyebrow">LATEST POST</p><h2>最近写了什么</h2></div>
           <p>从一篇会反复维护的长文开始，之后这里会慢慢长出更多内容。</p>
         </div>
-        <Link className="post-card" href={post.href}>
+        <Link className="post-card" href={post.href} data-scroll-reveal>
           <div className="post-number">01</div>
           <div className="post-main">
             <div className="post-tags"><span>ALGORITHM</span><span>C++</span><span>长期维护</span></div>
@@ -66,13 +68,13 @@ export default function Home() {
       </section>
 
       <section className="topics-section shell" id="writing">
-        <div className="section-heading">
+        <div className="section-heading" data-scroll-reveal>
           <div><p className="eyebrow">WHAT I WRITE</p><h2>写作方向</h2></div>
           <p>不预设唯一主题，只持续记录真正做过、想过和感受到的事情。</p>
         </div>
         <div className="topic-grid writing-grid">
           {writingTracks.map(([name, desc, label], index) => (
-            <div className="topic-card writing-card" key={name}>
+            <div className="topic-card writing-card" data-scroll-reveal key={name}>
               <span>0{index + 1}</span><div><small>{label}</small><h3>{name}</h3><p>{desc}</p></div><b>⌁</b>
             </div>
           ))}
@@ -80,8 +82,8 @@ export default function Home() {
       </section>
 
       <section className="about-section shell" id="about">
-        <p className="eyebrow">ABOUT THIS PLACE</p>
-        <div>
+        <p className="eyebrow" data-scroll-reveal>ABOUT THIS PLACE</p>
+        <div data-scroll-reveal>
           <h2>一个用来沉淀，而不是追赶的地方。</h2>
           <p>这里不会只放算法竞赛内容。它更像一张不断展开的个人地图：技术是坐标之一，项目、阅读和生活同样重要。</p>
         </div>
