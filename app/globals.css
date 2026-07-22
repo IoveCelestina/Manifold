@@ -216,7 +216,26 @@ button, input { font: inherit; }
 
 .reveal { animation: rise-in 600ms cubic-bezier(.2,.7,.2,1) both; }.reveal-delay { animation-delay: 100ms; }
 @keyframes rise-in { from { transform: translateY(12px); } to { transform: translateY(0); } }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+.reveal-ready [data-scroll-reveal] {
+  opacity: 0;
+  filter: blur(5px);
+  transform: translateY(24px);
+  transition:
+    opacity 700ms cubic-bezier(.2,.7,.2,1),
+    filter 700ms cubic-bezier(.2,.7,.2,1),
+    transform 700ms cubic-bezier(.2,.7,.2,1);
+  transition-delay: var(--reveal-delay, 0ms);
+  will-change: opacity, filter, transform;
+}
+.reveal-ready [data-scroll-reveal].is-visible { opacity: 1; filter: blur(0); transform: translateY(0); }
+.writing-card:nth-child(2) { --reveal-delay: 70ms; }
+.writing-card:nth-child(3) { --reveal-delay: 140ms; }
+.writing-card:nth-child(4) { --reveal-delay: 210ms; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .reveal-ready [data-scroll-reveal] { opacity: 1; filter: none; transform: none; }
+}
 
 @media (max-width: 1280px) {
   .docs-shell { grid-template-columns: 245px minmax(0, 760px); gap: 40px; }
