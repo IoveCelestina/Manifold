@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     description: "写代码，也写下代码之外的事。",
     type: "website",
     locale: "zh_CN",
-    images: [{ url: "/og.svg", width: 1200, height: 630, alt: "写代码，也写下代码之外的事 · ZSTUACM Blog" }],
+    images: [{ url: "/og.png", width: 1731, height: 909, alt: "写代码，也写下代码之外的事 · ZSTUACM Blog" }],
   },
   twitter: { card: "summary_large_image", images: ["/og.png"] },
 };
