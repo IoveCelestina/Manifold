@@ -1,9 +1,9 @@
 @import "tailwindcss";
 
 :root {
-  --font-display: var(--font-noto-serif-sc), "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", STSong, serif;
-  --font-body: var(--font-noto-sans-sc), "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  --font-meta: var(--font-inter), Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Noto Serif SC Variable", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", STSong, serif;
+  --font-body: "Noto Sans SC Variable", "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-meta: "Inter Variable", Inter, "Helvetica Neue", Arial, sans-serif;
   --font-editorial: var(--font-display);
   --font-mono: "IBM Plex Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
   --type-display-hero: clamp(64px, 5.5vw, 80px);
