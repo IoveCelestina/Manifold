@@ -27,7 +27,7 @@ export default function AlgorithmTemplatesPage() {
         <article className="docs-main">
           <div className="breadcrumbs"><Link href="/">首页</Link><span>/</span><span>算法模板</span></div>
           <header className="article-header">
-            <p className="eyebrow">ALGORITHM / HANDBOOK</p>
+            <p className="article-kind">研究档案 / 算法竞赛</p>
             <h1>{post.title}</h1>
             <p>{post.description}</p>
             <div><span>{post.updatedAt} 更新</span><span>{post.sizeLabel}</span><span>{post.sectionCount} 个主章节</span></div>
@@ -37,10 +37,14 @@ export default function AlgorithmTemplatesPage() {
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeSlug, rehypeHighlight, [rehypeKatex, { strict: "ignore" }]]}
-              components={{ img: ({ src, alt }) => src ? <img src={src} alt={alt ?? ""} /> : null }}
+              components={{ img: ({ src, alt }) => {
+                if (!src) return null;
+                // eslint-disable-next-line @next/next/no-img-element
+                return <img src={src} alt={alt ?? ""} />;
+              } }}
             >{post.source}</ReactMarkdown>
           </div>
-          <footer className="article-footer"><p>到这里了，辛苦。</p><Link href="/">← 返回首页</Link></footer>
+          <footer className="article-footer"><p>已阅至文末</p><Link href="/">← 返回首页</Link></footer>
         </article>
         <ArticleToc headings={post.headings} />
       </div>

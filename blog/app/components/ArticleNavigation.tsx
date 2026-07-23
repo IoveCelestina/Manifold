@@ -13,14 +13,23 @@ export function ArticleNavigation({ headings }: { headings: Heading[] }) {
   }, [headings, query]);
 
   return (
-    <aside className="docs-left">
-      <label className="docs-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文章目录..." /><kbd>/</kbd></label>
-      <p className="nav-kicker">⌁ 算法模板</p>
-      <nav aria-label="文章章节">
-        {items.map((item, index) => <a className={item.level === 2 ? "nested" : index === 0 ? "active" : ""} href={`#${item.id}`} key={item.id}>{item.title}</a>)}
-      </nav>
-      <div className="nav-note"><span>持续更新</span><p>发现错误或想补充内容，可以直接修改源 Markdown。</p></div>
-    </aside>
+    <>
+      <aside className="docs-left">
+        <label className="docs-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文章目录..." /><kbd>/</kbd></label>
+        <p className="nav-kicker">文章索引</p>
+        <nav aria-label="文章章节">
+          {items.map((item, index) => <a className={item.level === 2 ? "nested" : index === 0 ? "active" : ""} href={`#${item.id}`} key={item.id}>{item.title}</a>)}
+        </nav>
+        <div className="nav-note"><span>文章维护</span><p>发现错误或想补充内容，可以直接修改源 Markdown。</p></div>
+      </aside>
+      <details className="docs-mobile-nav">
+        <summary>浏览文章目录</summary>
+        <label className="docs-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文章目录..." /></label>
+        <nav aria-label="移动端文章章节">
+          {items.map((item) => <a href={`#${item.id}`} key={item.id}>{item.title}</a>)}
+        </nav>
+      </details>
+    </>
   );
 }
 

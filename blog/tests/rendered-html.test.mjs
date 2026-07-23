@@ -20,7 +20,7 @@ test("server-renders the blog home page", async () => {
   const html = await response.text();
   assert.match(html, /CLESTIANA/);
   assert.match(html, /这里是我的个人博客/);
-  assert.match(html, /技术札记/);
+  assert.match(html, /项目复盘/);
   assert.match(html, /随手记录/);
   assert.match(html, /算法竞赛板子/);
   assert.match(html, /\/posts\/algorithm-templates/);
