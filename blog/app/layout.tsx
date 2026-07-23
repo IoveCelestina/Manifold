@@ -1,6 +1,30 @@
 import type { Metadata } from "next";
+import { Inter, Noto_Sans_SC, Noto_Serif_SC } from "next/font/google";
 import "katex/dist/katex.min.css";
 import "./globals.css";
+
+const displayFont = Noto_Serif_SC({
+  weight: "variable",
+  subsets: ["latin"],
+  display: "swap",
+  preload: false,
+  variable: "--font-noto-serif-sc",
+});
+
+const bodyFont = Noto_Sans_SC({
+  weight: "variable",
+  subsets: ["latin"],
+  display: "swap",
+  preload: false,
+  variable: "--font-noto-sans-sc",
+});
+
+const metaFont = Inter({
+  weight: "variable",
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://blog.zstuacm.xyz"),
@@ -17,5 +41,13 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN" suppressHydrationWarning><body>{children}</body></html>;
+  return (
+    <html
+      className={`${displayFont.variable} ${bodyFont.variable} ${metaFont.variable}`}
+      lang="zh-CN"
+      suppressHydrationWarning
+    >
+      <body>{children}</body>
+    </html>
+  );
 }
