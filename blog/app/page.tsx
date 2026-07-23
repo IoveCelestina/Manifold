@@ -3,9 +3,9 @@ import { SiteHeader } from "./components/SiteHeader";
 import { post } from "./lib/post";
 
 const writingTracks = [
-  ["算法竞赛", "算法模板、题目思路，以及值得反复查阅的推导。"],
-  ["随手记录", "收藏阅读、灵感，以及代码之外值得留下的生活片段。"],
-  ["项目复盘", "从想法、约束到落地结果，记录真实决策与走过的弯路。"],
+  ["算法竞赛", "算法模板、题目思路，以及值得反复查阅的推导。", "/posts#algorithms"],
+  ["随手记录", "收藏阅读、灵感，以及代码之外值得留下的生活片段。", "#latest"],
+  ["项目复盘", "从想法、约束到落地结果，记录真实决策与走过的弯路。", "#latest"],
 ];
 
 export default function Home() {
@@ -55,8 +55,8 @@ export default function Home() {
           <p>按真实工作与长期兴趣组织内容，让技术、阅读和生活保持在同一份档案里。</p>
         </div>
         <div className="topic-ledger">
-          {writingTracks.map(([name, desc]) => (
-            <a className="topic-entry" href="#latest" key={name} data-scroll-reveal>
+          {writingTracks.map(([name, desc, href]) => (
+            <a className="topic-entry" href={href} key={name} data-scroll-reveal>
               <h3>{name}</h3><p>{desc}</p>
             </a>
           ))}

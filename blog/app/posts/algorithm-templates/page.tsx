@@ -25,7 +25,7 @@ export default function AlgorithmTemplatesPage() {
             <p className="article-kind">研究档案 / 算法竞赛</p>
             <h1>{post.title}</h1>
             <p>{post.description}</p>
-            <div><span>{post.updatedAt} 更新</span><span>{post.sizeLabel}</span><span>{post.sectionCount} 个主章节</span></div>
+            <div className="article-meta"><span>{post.updatedAt} 更新</span><span>{post.sizeLabel}</span><span>{post.sectionCount} 个主章节</span></div>
           </header>
           <div className="article-separator" />
           <ArticleBody />

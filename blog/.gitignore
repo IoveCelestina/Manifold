@@ -42,3 +42,6 @@ next-env.d.ts
 /outputs/
 /work/
 /content/*.generated.html
+/app/lib/csdn-content.generated.ts
+/app/lib/csdn-metadata.generated.ts
+/app/lib/csdn-html/

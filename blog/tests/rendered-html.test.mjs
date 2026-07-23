@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render(pathname = "/") {
@@ -24,6 +25,7 @@ test("server-renders the blog home page", async () => {
   assert.match(html, /随手记录/);
   assert.match(html, /算法竞赛板子/);
   assert.match(html, /\/posts\/algorithm-templates/);
+  assert.match(html, /\/posts#algorithms/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -43,4 +45,36 @@ test("server-renders the complete algorithm article", async () => {
   assert.doesNotMatch(lcsSection, /katex-error/);
   assert.doesNotMatch(html, /## 背包/);
   assert.doesNotMatch(html, /\[TOC\]/);
+});
+
+test("server-renders the migrated article archive", async () => {
+  const response = await render("/posts");
+  assert.equal(response.status, 200);
+  const html = (await response.text()).replaceAll("<!-- -->", "");
+  assert.match(html, /文章归档/);
+  assert.match(html, /id="algorithms"/);
+  assert.match(html, /67 篇迁移文章/);
+  assert.match(html, /The 2024 ICPC Asia Shenyang Regional Contest/);
+  assert.match(html, /\/posts\/153637462/);
+  assert.match(html, /class="archive-summary"/);
+  assert.match(html, /class="katex"/);
+});
+
+test("server-renders a migrated CSDN article", async () => {
+  const response = await render("/posts/153637462");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /The 2024 ICPC Asia Shenyang Regional Contest/);
+  assert.match(html, /补题链接/);
+  assert.match(html, /language-cpp/);
+  assert.match(html, /\/csdn-assets\/153637462\//);
+  assert.doesNotMatch(html, /i-blog\.csdnimg\.cn/);
+  const articleHeader = html.slice(html.indexOf('class="article-header"'), html.indexOf('class="article-separator"'));
+  assert.match(articleHeader, /class="article-summary"/);
+  assert.match(articleHeader, /class="katex"/);
+});
+
+test("generated archive summaries do not contain nested links", async () => {
+  const generated = await readFile(new URL("../app/lib/csdn-metadata.generated.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(generated, /<a\s/i);
 });
