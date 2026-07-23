@@ -30,11 +30,6 @@ export default function Home() {
           <figure>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/research-desk.webp" width="1024" height="1280" loading="eager" alt="摊开的算法研究笔记、打印图表与电子硬件原型" />
-            <figcaption>
-              <span>重点阅读</span>
-              <strong>{post.title}</strong>
-              <small>{post.updatedAt} / {post.sectionCount} 个主章节</small>
-            </figcaption>
           </figure>
         </Link>
       </section>
