@@ -6,7 +6,10 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "content:build": "node scripts/render-article.mjs",
+    "predev": "npm run content:build",
     "dev": "vinext dev",
+    "prebuild": "npm run content:build",
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",

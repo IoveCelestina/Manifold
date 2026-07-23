@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { ScrollReveal } from "./components/ScrollReveal";
 import { SiteHeader } from "./components/SiteHeader";
 import { post } from "./lib/post";
@@ -22,16 +21,16 @@ export default function Home() {
           <p className="hero-lede">这里是我的个人博客，也是一份关于技术实践、项目复盘、算法竞赛与阅读生活的私人研究档案。</p>
           <div className="hero-actions">
             <a className="primary-button" href="#latest">进入档案</a>
-            <Link className="secondary-button" href={post.href}>阅读专题</Link>
+            <a className="secondary-button" href={post.href}>阅读专题</a>
           </div>
         </div>
 
-        <Link className="cover-visual reveal reveal-delay" href={post.href} aria-label={`阅读专题：${post.title}`}>
+        <a className="cover-visual reveal reveal-delay" href={post.href} aria-label={`阅读专题：${post.title}`}>
           <figure>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/research-desk.webp" width="1024" height="1280" loading="eager" alt="摊开的算法研究笔记、打印图表与电子硬件原型" />
           </figure>
-        </Link>
+        </a>
       </section>
 
       <section className="latest-section shell" id="latest">
@@ -39,7 +38,7 @@ export default function Home() {
           <h2>近期归档</h2>
           <p>从一篇会持续维护的算法手册开始，逐步建立可复查的个人知识索引。</p>
         </div>
-        <Link className="post-row" href={post.href} data-scroll-reveal>
+        <a className="post-row" href={post.href} data-scroll-reveal>
           <div className="post-date"><span>{post.updatedAt}</span><small>算法竞赛</small></div>
           <div className="post-main">
             <h3>{post.title}</h3>
@@ -47,7 +46,7 @@ export default function Home() {
             <div className="post-stats"><span>C++</span><span>{post.sectionCount} 个主章节</span><span>约 {post.sizeLabel}</span></div>
           </div>
           <div className="post-arrow" aria-hidden="true">→</div>
-        </Link>
+        </a>
       </section>
 
       <section className="topics-section shell" id="writing">
