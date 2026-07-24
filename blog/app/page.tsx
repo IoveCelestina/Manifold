@@ -1,12 +1,7 @@
 import { ScrollReveal } from "./components/ScrollReveal";
 import { SiteHeader } from "./components/SiteHeader";
-import { post } from "./lib/post";
-
-const writingTracks = [
-  ["算法竞赛", "算法模板、题目思路，以及值得反复查阅的推导。", "/posts#algorithms"],
-  ["随手记录", "收藏阅读、灵感，以及代码之外值得留下的生活片段。", "#latest"],
-  ["项目复盘", "从想法、约束到落地结果，记录真实决策与走过的弯路。", "#latest"],
-];
+import { formatPublicationDate } from "./lib/csdn-posts";
+import { featuredPost, journalSections, latestPosts } from "./lib/journal-posts";
 
 export default function Home() {
   return (
@@ -21,11 +16,11 @@ export default function Home() {
           <p className="hero-lede">这里是我的个人博客，也是一份关于技术实践、项目复盘、算法竞赛与阅读生活的私人研究档案。</p>
           <div className="hero-actions">
             <a className="primary-button" href="#latest">进入档案</a>
-            <a className="secondary-button" href={post.href}>阅读专题</a>
+            <a className="secondary-button" href={featuredPost.href}>阅读专题</a>
           </div>
         </div>
 
-        <a className="cover-visual reveal reveal-delay" href={post.href} aria-label={`阅读专题：${post.title}`}>
+        <a className="cover-visual reveal reveal-delay" href={featuredPost.href} aria-label={`阅读专题：${featuredPost.title}`}>
           <figure>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/research-desk.webp" width="1024" height="1280" loading="eager" alt="摊开的算法研究笔记、打印图表与电子硬件原型" />
@@ -33,33 +28,73 @@ export default function Home() {
         </a>
       </section>
 
-      <section className="latest-section shell" id="latest">
-        <div className="section-heading" data-scroll-reveal>
-          <h2>近期归档</h2>
-          <p>从一篇会持续维护的算法手册开始，逐步建立可复查的个人知识索引。</p>
-        </div>
-        <a className="post-row" href={post.href} data-scroll-reveal>
-          <div className="post-date"><span>{post.updatedAt}</span><small>算法竞赛</small></div>
-          <div className="post-main">
-            <h3>{post.title}</h3>
-            <p>{post.description}</p>
-            <div className="post-stats"><span>C++</span><span>{post.sectionCount} 个主章节</span><span>约 {post.sizeLabel}</span></div>
+      <section className="featured-section shell" id="featured">
+        <div className="editorial-heading" data-scroll-reveal>
+          <div>
+            <p>FEATURED ARTICLE</p>
+            <h2>精选文章</h2>
           </div>
-          <div className="post-arrow" aria-hidden="true">→</div>
+          <p>最近更新的一篇文章，来自持续整理中的个人技术档案。</p>
+        </div>
+        <a className="index-entry" href={featuredPost.href} data-scroll-reveal>
+          <span className="entry-number">01</span>
+          <div className="entry-content">
+            <span className="entry-category">{featuredPost.category}</span>
+            <h3>{featuredPost.title}</h3>
+            {featuredPost.summaryHtml
+              ? <div className="entry-summary" dangerouslySetInnerHTML={{ __html: featuredPost.summaryHtml }} />
+              : <div className="entry-summary"><p>{featuredPost.description}</p></div>}
+          </div>
+          <time dateTime={featuredPost.publishedAt.slice(0, 10)}>{formatPublicationDate(featuredPost.publishedAt)}</time>
         </a>
       </section>
 
-      <section className="topics-section shell" id="writing">
-        <div className="section-heading" data-scroll-reveal>
-          <h2>研究目录</h2>
-          <p>按真实工作与长期兴趣组织内容，让技术、阅读和生活保持在同一份档案里。</p>
+      <section className="latest-section shell" id="latest">
+        <div className="editorial-heading" data-scroll-reveal>
+          <div>
+            <p>LATEST NOTES</p>
+            <h2>最新笔记</h2>
+          </div>
+          <p>按发表时间自动更新，收录近期写下的题解、实践与零散记录。</p>
         </div>
-        <div className="topic-ledger">
-          {writingTracks.map(([name, desc, href]) => (
-            <a className="topic-entry" href={href} key={name} data-scroll-reveal>
-              <h3>{name}</h3><p>{desc}</p>
+        <div className="index-list">
+          {latestPosts.map((item, index) => (
+            <a className="index-entry" href={item.href} key={item.id} data-scroll-reveal>
+              <span className="entry-number">{String(index + 1).padStart(2, "0")}</span>
+                <div className="entry-content">
+                  <span className="entry-category">{item.category}</span>
+                  <h3>{item.title}</h3>
+                  {item.summaryHtml
+                    ? <div className="entry-summary" dangerouslySetInnerHTML={{ __html: item.summaryHtml }} />
+                    : <div className="entry-summary"><p>{item.description}</p></div>}
+                </div>
+              <time dateTime={item.publishedAt.slice(0, 10)}>{formatPublicationDate(item.publishedAt)}</time>
             </a>
           ))}
+        </div>
+      </section>
+
+      <section className="topics-section shell" id="writing">
+        <div className="editorial-heading" data-scroll-reveal>
+          <div>
+            <p>PUBLICATION SECTIONS</p>
+            <h2>刊物栏目</h2>
+          </div>
+          <p>三个长期写作方向，构成这份个人技术刊物的内容索引。</p>
+        </div>
+        <div className="publication-index">
+          {journalSections.map((section) => {
+            const content = (
+              <>
+                <span>{section.id}</span>
+                <h3>{section.name}</h3>
+                <p>{`${section.count} ARTICLES / ${section.description}`}</p>
+              </>
+            );
+            return section.href
+              ? <a className="publication-track" href={section.href} key={section.id} data-scroll-reveal>{content}</a>
+              : <div className="publication-track publication-track-static" key={section.id} data-scroll-reveal>{content}</div>;
+          })}
         </div>
       </section>
 

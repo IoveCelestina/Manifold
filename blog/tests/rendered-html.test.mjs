@@ -24,6 +24,14 @@ test("server-renders the blog home page", async () => {
   assert.match(html, /项目复盘/);
   assert.match(html, /随手记录/);
   assert.match(html, /算法竞赛板子/);
+  assert.match(html, /FEATURED ARTICLE/);
+  assert.match(html, /LATEST NOTES/);
+  assert.match(html, /The 2024 ICPC Asia Shenyang Regional Contest/);
+  assert.match(html, /class="entry-summary"/);
+  assert.match(html, /class="katex"/);
+  assert.match(html, /<strong>传送门<\/strong>/);
+  assert.match(html, /68 ARTICLES/);
+  assert.match(html, /0 ARTICLES/);
   assert.match(html, /\/posts\/algorithm-templates/);
   assert.match(html, /\/posts#algorithms/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
@@ -63,7 +71,7 @@ test("server-renders the migrated article archive", async () => {
 test("server-renders a migrated CSDN article", async () => {
   const response = await render("/posts/153637462");
   assert.equal(response.status, 200);
-  const html = await response.text();
+  const html = (await response.text()).replaceAll("<!-- -->", "");
   assert.match(html, /The 2024 ICPC Asia Shenyang Regional Contest/);
   assert.match(html, /补题链接/);
   assert.match(html, /language-cpp/);
