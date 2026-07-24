@@ -127,7 +127,7 @@ log "拉起 postgres..."
 ( cd "$DEPLOY_DIR" && docker compose up -d postgres )
 
 log "等 postgres 健康..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   state=$(docker inspect -f '{{.State.Health.Status}}' "$POSTGRES_CONTAINER" 2>/dev/null || echo "starting")
   [[ "$state" == "healthy" ]] && break
   sleep 2
@@ -151,7 +151,7 @@ log "拉起完整 compose 栈..."
 
 log "等 sub2api 健康..."
 SUB2API_CONTAINER="manifold-sub2api"
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Health.Status}}' "$SUB2API_CONTAINER" 2>/dev/null || echo "starting")
   [[ "$state" == "healthy" ]] && break
   sleep 2
