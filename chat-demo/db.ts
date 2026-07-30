@@ -169,11 +169,14 @@ db.exec(`
     email        TEXT,
     key_label    TEXT,
     key_platform TEXT,
+    key_validated INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL,
     expires_at   INTEGER NOT NULL
   );
 `);
 db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(uid)');
+// 升级前 key-only session 没有经过上游验证，默认 0；readSession 会令其失效并要求重新贴 key。
+try { db.exec('ALTER TABLE sessions ADD COLUMN key_validated INTEGER NOT NULL DEFAULT 0'); } catch { /* 列已存在 */ }
 
 interface SessionRow {
   token: string;
@@ -184,6 +187,7 @@ interface SessionRow {
   email: string | null;
   key_label: string | null;
   key_platform: string | null;
+  key_validated: number;
   created_at: number;
   expires_at: number;
 }
@@ -195,18 +199,19 @@ interface CreateSessionInput {
   email?: string | null;
   key_label?: string | null;
   key_platform?: string | null;
+  key_validated?: boolean;
   ttlMs?: number;
 }
 
 const stmtSessIns: Stmt = db.prepare(`
-  INSERT INTO sessions (token, uid, jwt, refresh, api_key, email, key_label, key_platform, created_at, expires_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO sessions (token, uid, jwt, refresh, api_key, email, key_label, key_platform, key_validated, created_at, expires_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtSessGet: Stmt = db.prepare('SELECT * FROM sessions WHERE token = ?');
 const stmtSessDel: Stmt = db.prepare('DELETE FROM sessions WHERE token = ?');
 const stmtSessTokens: Stmt = db.prepare('UPDATE sessions SET jwt = ?, refresh = ? WHERE token = ?');
 const stmtSessKey: Stmt = db.prepare(
-  'UPDATE sessions SET api_key = ?, key_label = ?, key_platform = ? WHERE token = ?'
+  'UPDATE sessions SET api_key = ?, key_label = ?, key_platform = ?, key_validated = 1 WHERE token = ?'
 );
 
 // 新建 session，返回随机 256-bit token（即 cookie 值）。
@@ -222,6 +227,7 @@ function createSession(input: CreateSessionInput): string {
     input.email ?? null,
     input.key_label ?? null,
     input.key_platform ?? null,
+    input.key_validated ? 1 : 0,
     now,
     now + (input.ttlMs || SESSION_TTL_MS)
   );
@@ -234,6 +240,7 @@ function readSession(token: string | null): SessionRow | null {
   const r = stmtSessGet.get(token) as SessionRow | undefined;
   if (!r) return null;
   if (r.expires_at <= Date.now()) { stmtSessDel.run(token); return null; }
+  if (r.uid === null && r.api_key && !r.key_validated) { stmtSessDel.run(token); return null; }
   return r;
 }
 
@@ -292,8 +299,27 @@ db.exec(`
   );
 `);
 db.exec('CREATE INDEX IF NOT EXISTS idx_mb_hash ON message_blobs(blob_hash)');
+// 上传 grant 独立于 message_blobs：前端先上传、后发消息时也能立即做归属与配额校验。
+// 同一内容可由多个用户各自上传获得 grant；仅知道 hash 不能获得 grant。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS blob_owners (
+    uid        INTEGER NOT NULL,
+    blob_hash  TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (uid, blob_hash)
+  );
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_blob_owners_hash ON blob_owners(blob_hash)');
 // Phase 2：已存在的库补 name 列（文件名按「消息↔blob 链接」存，同 hash 可不同名）。重复跑报 duplicate column，忽略。
 try { db.exec("ALTER TABLE message_blobs ADD COLUMN name TEXT NOT NULL DEFAULT ''"); } catch { /* 列已存在 */ }
+// 迁移已有消息的所有权，保证升级前附件仍可读且纳入用户配额。
+db.exec(`
+  INSERT OR IGNORE INTO blob_owners (uid, blob_hash, created_at)
+  SELECT DISTINCT m.uid, mb.blob_hash, b.created_at
+  FROM messages m
+  JOIN message_blobs mb ON mb.message_id = m.id
+  JOIN blobs b ON b.hash = mb.blob_hash
+`);
 
 interface ConvMetaRow { id: string; title: string; createdAt: number; updatedAt: number; }
 interface BlobRef { hash: string; name: string; mime: string; size: number; }
@@ -323,13 +349,33 @@ const stmtMsgHasConv: Stmt = db.prepare('SELECT 1 FROM messages WHERE conv_id = 
 // blob
 const stmtBlobIns: Stmt = db.prepare('INSERT OR IGNORE INTO blobs (hash, mime, size, created_at) VALUES (?, ?, ?, ?)');
 const stmtBlobGet: Stmt = db.prepare('SELECT hash, mime, size FROM blobs WHERE hash = ?');
+const stmtBlobTotalUsage: Stmt = db.prepare('SELECT COALESCE(SUM(size), 0) AS bytes FROM blobs');
 const stmtMbIns: Stmt = db.prepare('INSERT OR IGNORE INTO message_blobs (message_id, blob_hash, ord, name) VALUES (?, ?, ?, ?)');
 const stmtMbByMsg: Stmt = db.prepare('SELECT mb.blob_hash AS hash, mb.name, b.mime, b.size FROM message_blobs mb JOIN blobs b ON b.hash = mb.blob_hash WHERE mb.message_id = ? ORDER BY mb.ord');
 const stmtMbDelByConv: Stmt = db.prepare('DELETE FROM message_blobs WHERE message_id IN (SELECT id FROM messages WHERE conv_id = ? AND uid = ?)');
-const stmtBlobOwn: Stmt = db.prepare('SELECT 1 FROM messages m JOIN message_blobs mb ON m.id = mb.message_id WHERE m.uid = ? AND mb.blob_hash = ? LIMIT 1');
+const stmtBlobOwn: Stmt = db.prepare(`
+  SELECT 1 FROM blob_owners WHERE uid = ? AND blob_hash = ?
+  UNION ALL
+  SELECT 1 FROM messages m JOIN message_blobs mb ON m.id = mb.message_id WHERE m.uid = ? AND mb.blob_hash = ?
+  LIMIT 1
+`);
+const stmtBlobOwnerGet: Stmt = db.prepare('SELECT 1 FROM blob_owners WHERE uid = ? AND blob_hash = ?');
+const stmtBlobOwnerIns: Stmt = db.prepare('INSERT INTO blob_owners (uid, blob_hash, created_at) VALUES (?, ?, ?)');
+const stmtBlobOwnerTouch: Stmt = db.prepare('UPDATE blob_owners SET created_at = ? WHERE uid = ? AND blob_hash = ?');
+const stmtBlobOwnerUsage: Stmt = db.prepare(`
+  SELECT COUNT(*) AS count, COALESCE(SUM(b.size), 0) AS bytes
+  FROM blob_owners bo JOIN blobs b ON b.hash = bo.blob_hash
+  WHERE bo.uid = ?
+`);
+const stmtBlobOwnersDel: Stmt = db.prepare('DELETE FROM blob_owners WHERE blob_hash = ?');
 // 孤儿 blob：无任何 message_blobs 引用。带 created_at 宽限过滤——刚上传但还没挂到消息上的 blob
 // （前端「先传 blob 拿 hash → 再发消息挂载」之间的窗口）不能被 GC 误删。
-const stmtBlobOrphans: Stmt = db.prepare('SELECT hash FROM blobs WHERE created_at < ? AND hash NOT IN (SELECT DISTINCT blob_hash FROM message_blobs)');
+const stmtBlobOrphans: Stmt = db.prepare(`
+  SELECT b.hash FROM blobs b
+  WHERE b.created_at < ?
+    AND b.hash NOT IN (SELECT DISTINCT blob_hash FROM message_blobs)
+    AND b.hash NOT IN (SELECT blob_hash FROM blob_owners WHERE created_at >= ?)
+`);
 const stmtBlobDel: Stmt = db.prepare('DELETE FROM blobs WHERE hash = ?');
 
 function listConvs(uid: number): ConvMetaRow[] {
@@ -388,17 +434,80 @@ function getBlobMeta(hash: string): { hash: string; mime: string; size: number }
 function linkBlob(messageId: string, hash: string, ord: number, name = ''): void {
   stmtMbIns.run(messageId, hash, ord, name);
 }
-// blob 鉴权：当前 uid 是否拥有引用该 hash 的消息
+type ClaimBlobResult =
+  | { ok: true; hash: string; mime: string; size: number; ownerCreated: boolean; blobCreated: boolean }
+  | { ok: false; code: 'quota_count' | 'quota_bytes' | 'quota_total'; limit: number };
+
+// 在一个写事务里核算并授予 blob grant，避免并发上传绕过用户或全局配额。
+function claimBlob(
+  uid: number,
+  hash: string,
+  mime: string,
+  size: number,
+  maxCount: number,
+  maxBytesPerUser: number,
+  maxBytesTotal: number
+): ClaimBlobResult {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const existingMeta = stmtBlobGet.get(hash);
+    const existingOwner = !!stmtBlobOwnerGet.get(uid, hash);
+    if (existingOwner && existingMeta) {
+      stmtBlobOwnerTouch.run(Date.now(), uid, hash);
+      db.exec('COMMIT');
+      return { ok: true, hash, mime: existingMeta.mime, size: existingMeta.size, ownerCreated: false, blobCreated: false };
+    }
+
+    const usage = stmtBlobOwnerUsage.get(uid) as any;
+    const effectiveSize = existingMeta ? Number(existingMeta.size) : size;
+    if (Number(usage.count) >= maxCount) {
+      db.exec('ROLLBACK');
+      return { ok: false, code: 'quota_count', limit: maxCount };
+    }
+    if (Number(usage.bytes) + effectiveSize > maxBytesPerUser) {
+      db.exec('ROLLBACK');
+      return { ok: false, code: 'quota_bytes', limit: maxBytesPerUser };
+    }
+    if (!existingMeta) {
+      const total = Number((stmtBlobTotalUsage.get() as any).bytes);
+      if (total + size > maxBytesTotal) {
+        db.exec('ROLLBACK');
+        return { ok: false, code: 'quota_total', limit: maxBytesTotal };
+      }
+      stmtBlobIns.run(hash, mime, size, Date.now());
+    }
+    stmtBlobOwnerIns.run(uid, hash, Date.now());
+    db.exec('COMMIT');
+    return {
+      ok: true,
+      hash,
+      mime: existingMeta ? existingMeta.mime : mime,
+      size: existingMeta ? existingMeta.size : size,
+      ownerCreated: true,
+      blobCreated: !existingMeta,
+    };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction may already be closed */ }
+    throw e;
+  }
+}
+
+// blob 鉴权：上传 grant 或当前 uid 的消息引用任一成立。
 function userOwnsBlob(uid: number, hash: string): boolean {
-  return !!stmtBlobOwn.get(uid, hash);
+  return !!stmtBlobOwn.get(uid, hash, uid, hash);
 }
 // 孤儿 blob 的 hash 列表（GC 用）。只返回 created_at < beforeMs 的，给新上传留宽限期。
 function orphanBlobs(beforeMs: number = Number.MAX_SAFE_INTEGER): string[] {
-  return stmtBlobOrphans.all(beforeMs).map((r: any) => r.hash);
+  return stmtBlobOrphans.all(beforeMs, beforeMs).map((r: any) => r.hash);
 }
 // 删 blob 元数据行（文件由调用方删）。
 function deleteBlob(hash: string): void {
-  stmtBlobDel.run(hash);
+  db.exec('BEGIN');
+  try {
+    stmtBlobOwnersDel.run(hash);
+    stmtBlobDel.run(hash);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
 // 迁移用：列出所有会话（含 data 列），供 migrate-phase1.ts 把老 JSON-blob 拆进新表。
@@ -417,5 +526,5 @@ module.exports = {
   // Phase 1：会话/消息/blob 数据访问层
   listConvs, getConvMeta, createConv, renameConv, touchConv, deleteConv, convHasMessages,
   nextSeq, insertMessage, getMessages,
-  insertBlob, getBlobMeta, linkBlob, userOwnsBlob, orphanBlobs, deleteBlob, listConvsForMigration,
+  insertBlob, getBlobMeta, claimBlob, linkBlob, userOwnsBlob, orphanBlobs, deleteBlob, listConvsForMigration,
 };

@@ -19,7 +19,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Readable } = require('node:stream');
+const { Readable, Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const crypto = require('node:crypto');
 
 const BASE: string = (process.env.SUB2API_BASE || 'https://zstuacm.xyz').replace(/\/+$/, '');
@@ -51,7 +52,29 @@ const LEGACY_STORE = (process.env.LEGACY_STORE || 'on').toLowerCase() !== 'off';
 
 // ── 会话存储 + 服务端 session（node:sqlite 单文件）──────────────────
 const db = require('./db.ts');
-const STORE_MAX_BODY = 100 * 1024 * 1024;    // /store 单条对话写入上限，防 DB 撑肿
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
+// 请求体按用途分档。blob 不走内存聚合，另由 BLOB_MAX_BYTES 流式限制。
+const AUTH_MAX_BODY = positiveIntEnv('AUTH_MAX_BODY_BYTES', 16 * 1024);
+const SMALL_JSON_MAX_BODY = positiveIntEnv('SMALL_JSON_MAX_BODY_BYTES', 64 * 1024);
+const CHAT_MAX_BODY = positiveIntEnv('CHAT_MAX_BODY_BYTES', 2 * 1024 * 1024);
+const IMAGE_MAX_BODY = positiveIntEnv('IMAGE_MAX_BODY_BYTES', 16 * 1024 * 1024);
+const MAX_BODY = positiveIntEnv('MAX_JSON_BODY_BYTES', 16 * 1024 * 1024);
+const STORE_MAX_BODY = positiveIntEnv('STORE_MAX_BODY_BYTES', 16 * 1024 * 1024);
+const API_KEY_MAX_LENGTH = positiveIntEnv('API_KEY_MAX_LENGTH', 512);
+const BLOB_MAX_BYTES = positiveIntEnv('BLOB_MAX_BYTES', 8 * 1024 * 1024);
+const BLOB_MAX_COUNT_PER_USER = positiveIntEnv('BLOB_MAX_COUNT_PER_USER', 1000);
+const BLOB_MAX_BYTES_PER_USER = positiveIntEnv('BLOB_MAX_BYTES_PER_USER', 500 * 1024 * 1024);
+const BLOB_MAX_BYTES_TOTAL = positiveIntEnv('BLOB_MAX_BYTES_TOTAL', 20 * 1024 * 1024 * 1024);
+const BLOB_MAX_CONCURRENT_PER_USER = positiveIntEnv('BLOB_MAX_CONCURRENT_PER_USER', 2);
+const BLOB_MAX_CONCURRENT_TOTAL = positiveIntEnv('BLOB_MAX_CONCURRENT_TOTAL', 16);
+const REQUEST_TIMEOUT_MS = positiveIntEnv('REQUEST_TIMEOUT_MS', 2 * 60 * 1000);
+const MAX_MESSAGE_TEXT_BYTES = positiveIntEnv('MAX_MESSAGE_TEXT_BYTES', 200 * 1024);
+const MAX_CONV_TITLE_LENGTH = positiveIntEnv('MAX_CONV_TITLE_LENGTH', 200);
+const MAX_ATTACHMENTS = positiveIntEnv('MAX_ATTACHMENTS', 4);
 const CONV_ID_RE = /^[A-Za-z0-9_-]{1,128}$/; // 合法会话 id（与前端 c_xxx 命名一致）
 const HASH_RE = /^[a-f0-9]{64}$/;            // sha256 hex，校验 /api/blobs/:hash 防路径穿越
 
@@ -60,6 +83,48 @@ const BLOB_DIR: string = process.env.BLOB_DIR || path.join(path.dirname(db.DB_PA
 fs.mkdirSync(BLOB_DIR, { recursive: true });
 function blobPath(hash: string): string { return path.join(BLOB_DIR, hash); }
 function sha256(buf: Buffer): string { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+// 只有能由短魔数明确识别的位图才允许同源内联。SVG/HTML/声明与内容不符的文件一律下载。
+function sniffSafeImageMime(buf: Buffer): string | null {
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && (buf.subarray(0, 6).toString('ascii') === 'GIF87a' || buf.subarray(0, 6).toString('ascii') === 'GIF89a')) return 'image/gif';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+// 服务端生成图片也走同一套用户/全局配额，避免绕过上传端点直接撑满 blob 卷。
+function persistBufferBlobForUser(uid: number, buf: Buffer, requestedMime: string): string | null {
+  const hash = sha256(buf);
+  const finalPath = blobPath(hash);
+  const hadMeta = !!db.getBlobMeta(hash);
+  let createdFile = false;
+  const tempPath = path.join(BLOB_DIR, `.generated-${crypto.randomBytes(16).toString('hex')}.tmp`);
+  try {
+    if (!fs.existsSync(finalPath)) {
+      fs.writeFileSync(tempPath, buf, { flag: 'wx', mode: 0o600 });
+      try { fs.linkSync(tempPath, finalPath); createdFile = true; }
+      catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
+    }
+    const mime = sniffSafeImageMime(buf.subarray(0, 32)) || requestedMime || 'application/octet-stream';
+    const claim = db.claimBlob(
+      uid, hash, mime, buf.length,
+      BLOB_MAX_COUNT_PER_USER, BLOB_MAX_BYTES_PER_USER, BLOB_MAX_BYTES_TOTAL
+    );
+    if (!claim.ok) {
+      if (createdFile && !hadMeta && !db.getBlobMeta(hash)) fs.rmSync(finalPath, { force: true });
+      console.warn(`[blob-quota] generated image rejected uid=${uid} code=${claim.code}`);
+      return null;
+    }
+    return hash;
+  } catch (e: any) {
+    if (createdFile && !hadMeta && !db.getBlobMeta(hash)) fs.rmSync(finalPath, { force: true });
+    console.error('[blob] generated image persist failed:', e?.message || e);
+    return null;
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+}
 
 // Phase 2：纯文本类文件附件——按 UTF-8 读进上下文。单文件注入上限，超出截断。
 const FILE_TEXT_MAX = 100_000;
@@ -215,23 +280,24 @@ const SKIP_RES_HEADERS = new Set([
   'set-cookie',
 ]);
 
-const MAX_BODY = 100 * 1024 * 1024; // 单请求体上限；防恶意大包打爆内存。
-
 function collectBody(req: IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let settled = false;
     req.on('data', (c: Buffer) => {
+      if (settled) return; // 超限后继续丢弃已在途的数据，先让 413 响应正常写回。
       total += c.length;
       if (total > limit) {
+        settled = true;
+        chunks.length = 0;
         reject(Object.assign(new Error(`请求体超过 ${Math.round(limit / 1024 / 1024)}MB 上限`), { statusCode: 413 }));
-        req.destroy();
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    req.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks)); } });
+    req.on('error', (err: Error) => { if (!settled) { settled = true; reject(err); } });
   });
 }
 
@@ -239,6 +305,16 @@ async function readJsonBody(req: IncomingMessage, limit = MAX_BODY): Promise<any
   const buf = await collectBody(req, limit);
   if (!buf.length) return {};
   return JSON.parse(buf.toString('utf8'));
+}
+
+function sendBodyError(res: ServerResponse, err: any, fallback = '请求体非法'): void {
+  const status = err?.statusCode === 413 ? 413 : 400;
+  if (status === 413) res.setHeader('Connection', 'close');
+  sendJson(res, status, { error: { message: status === 413 ? err.message : fallback } });
+}
+
+function bodyTextTooLarge(value: unknown, maxBytes = MAX_MESSAGE_TEXT_BYTES): boolean {
+  return Buffer.byteLength(String(value ?? ''), 'utf8') > maxBytes;
 }
 
 // 背压泵：把上游 web ReadableStream 转发到 res，客户端消费慢时停一拍。返回中断原因（空串=正常）。
@@ -464,6 +540,33 @@ async function upstreamJsonAuth(session: any, method: string, pathStr: string, b
   }
 }
 
+function parseApiKey(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const key = value.trim();
+  if (!key || key.length > API_KEY_MAX_LENGTH || /[\u0000-\u001f\u007f]/.test(key)) return null;
+  return key;
+}
+
+// 在凭证进入本地 session 前向上游做一次只读鉴权；不读取/记录响应体，避免 key 泄露。
+async function validateApiKey(key: string): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(new Error('key 验证超时')), 10_000);
+  try {
+    const r = await fetch(BASE + '/v1/models', {
+      headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
+      signal: ctrl.signal,
+    });
+    try { await r.body?.cancel(); } catch { /* response body is irrelevant */ }
+    if (r.ok) return { ok: true };
+    if (r.status === 401 || r.status === 403) return { ok: false, status: 401, message: 'key 无效或无权访问' };
+    return { ok: false, status: 502, message: `上游暂时无法验证 key（HTTP ${r.status}）` };
+  } catch (e: any) {
+    return { ok: false, status: 502, message: e?.name === 'AbortError' ? 'key 验证超时' : '无法连接上游验证 key' };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // 解析 sub2api 的 key 列表（复刻前端 loadAccountKeys）：openai 平台排前。
 function parseKeys(keysData: any, groupsData: any): any[] {
   const arr = Array.isArray(keysData) ? keysData : (keysData?.items || keysData?.list || keysData?.keys || []);
@@ -519,14 +622,20 @@ async function establishSession(req: IncomingMessage, res: ServerResponse, data:
     if (usable[0]) { apiKey = usable[0].key; keyLabel = usable[0].name; keyPlatform = usable[0].platform; }
   } catch { /* key 拉取失败不阻塞登录 */ }
 
-  const token = db.createSession({ uid, jwt, refresh, api_key: apiKey, email, key_label: keyLabel, key_platform: keyPlatform });
+  const token = db.createSession({
+    uid, jwt, refresh, api_key: apiKey, email, key_label: keyLabel, key_platform: keyPlatform,
+    key_validated: !!apiKey,
+  });
   setSessionCookie(req, res, token, db.SESSION_TTL_MS);
   sendJson(res, 200, { ok: true });
 }
 
 async function apiLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  try { body = await readJsonBody(req, AUTH_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  if (typeof body.email !== 'string' || body.email.length > 320 || typeof body.password !== 'string' || body.password.length > 1024) {
+    sendJson(res, 400, { error: { message: '邮箱或密码格式非法' } }); return;
+  }
   try {
     const data = await upstreamJson('POST', '/api/v1/auth/login', { body: { email: body.email, password: body.password } });
     if (data?.temp_token && !data?.access_token) { sendJson(res, 200, { need_2fa: true, ticket: data.temp_token }); return; }
@@ -538,7 +647,10 @@ async function apiLogin(req: IncomingMessage, res: ServerResponse): Promise<void
 
 async function api2fa(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  try { body = await readJsonBody(req, AUTH_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  if (typeof body.ticket !== 'string' || body.ticket.length > 4096 || typeof body.code !== 'string' || body.code.length > 32) {
+    sendJson(res, 400, { error: { message: '二次验证参数格式非法' } }); return;
+  }
   try {
     const data = await upstreamJson('POST', '/api/v1/auth/login/2fa', { body: { temp_token: body.ticket, totp_code: body.code } });
     await establishSession(req, res, data);
@@ -549,10 +661,12 @@ async function api2fa(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
 async function apiKeylogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
-  const key = String(body.key || '').trim();
-  if (!key) { sendJson(res, 400, { error: { message: 'key 不能为空' } }); return; }
-  const token = db.createSession({ api_key: key, key_label: maskKey(key) });
+  try { body = await readJsonBody(req, AUTH_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  const key = parseApiKey(body.key);
+  if (!key) { sendJson(res, 400, { error: { message: `key 不能为空、不能含控制字符且最长 ${API_KEY_MAX_LENGTH} 字符` } }); return; }
+  const checked = await validateApiKey(key);
+  if (!checked.ok) { sendJson(res, checked.status, { error: { message: checked.message } }); return; }
+  const token = db.createSession({ api_key: key, key_label: maskKey(key), key_validated: true });
   setSessionCookie(req, res, token, db.SESSION_TTL_MS);
   sendJson(res, 200, { ok: true });
 }
@@ -594,7 +708,7 @@ async function apiKeys(res: ServerResponse, session: any): Promise<void> {
 
 async function apiKeysSelect(req: IncomingMessage, res: ServerResponse, session: any): Promise<void> {
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  try { body = await readJsonBody(req, SMALL_JSON_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
   if (session.uid === null) { sendJson(res, 400, { error: { message: '贴 key 模式不支持切换账户 key' } }); return; }
   try {
     const k = (await fetchKeysAuth(session)).find((x) => String(x.id) === String(body.id));
@@ -609,9 +723,11 @@ async function apiKeysSelect(req: IncomingMessage, res: ServerResponse, session:
 // 手动贴 key：把任意 key 存进当前 session（登录态 / keyonly 都可用）。key 进后端 session，不回浏览器。
 async function apiKeysManual(req: IncomingMessage, res: ServerResponse, session: any): Promise<void> {
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
-  const key = String(body.key || '').trim();
-  if (!key) { sendJson(res, 400, { error: { message: 'key 不能为空' } }); return; }
+  try { body = await readJsonBody(req, AUTH_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  const key = parseApiKey(body.key);
+  if (!key) { sendJson(res, 400, { error: { message: `key 不能为空、不能含控制字符且最长 ${API_KEY_MAX_LENGTH} 字符` } }); return; }
+  const checked = await validateApiKey(key);
+  if (!checked.ok) { sendJson(res, checked.status, { error: { message: checked.message } }); return; }
   db.updateSessionKey(session.token, key, maskKey(key), 'manual');
   sendJson(res, 200, { ok: true });
 }
@@ -680,9 +796,9 @@ function apiConvList(res: ServerResponse, session: any): void {
 async function apiConvCreate(req: IncomingMessage, res: ServerResponse, session: any): Promise<void> {
   if (session.uid === null) { sendJson(res, 400, { error: { message: '贴 key 模式会话存本地' } }); return; }
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  try { body = await readJsonBody(req, SMALL_JSON_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
   const id = (typeof body.id === 'string' && CONV_ID_RE.test(body.id)) ? body.id : ('c_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex'));
-  const title = String(body.title || '新对话');
+  const title = String(body.title || '新对话').slice(0, MAX_CONV_TITLE_LENGTH);
   if (!db.getConvMeta(session.uid, id)) db.createConv(session.uid, id, title);
   sendJson(res, 200, { id, title });
 }
@@ -716,8 +832,8 @@ function apiConvCancel(res: ServerResponse, session: any, convId: string): void 
 async function apiConvPatch(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
   if (session.uid === null || !db.getConvMeta(session.uid, convId)) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
-  db.renameConv(session.uid, convId, String(body.title || ''));
+  try { body = await readJsonBody(req, SMALL_JSON_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  db.renameConv(session.uid, convId, String(body.title || '').slice(0, MAX_CONV_TITLE_LENGTH));
   sendJson(res, 200, { ok: true });
 }
 function apiConvDelete(res: ServerResponse, session: any, convId: string): void {
@@ -919,12 +1035,18 @@ async function runChatTask(task: GenTask, apiKey: string, model: any, messages: 
 async function apiMessages(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
   if (!session.api_key) { sendJson(res, 400, { error: { message: '尚未设置 key，请先在设置里选/贴一个 key' } }); return; }
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  // key-only 会随请求重发本地历史（可能含压缩后的 dataURL）；有效 key 已在建 session 前验证，给其较高但有限的档位。
+  const bodyLimit = session.uid === null ? IMAGE_MAX_BODY : CHAT_MAX_BODY;
+  try { body = await readJsonBody(req, bodyLimit); } catch (e: any) { sendBodyError(res, e); return; }
+  if (typeof body.model !== 'string' || !body.model || body.model.length > 200) {
+    sendJson(res, 400, { error: { message: '模型参数格式非法' } }); return;
+  }
   const model = body.model;
 
   // keyonly：会话存本地，不落后端库；前端拼好的 messages 直接转发。
   if (session.uid === null) {
     const history = Array.isArray(body.messages) ? body.messages : [];
+    if (history.length > 500) { sendJson(res, 413, { error: { message: '消息历史条数过多' } }); return; }
     await streamChatUpstream(res, session.api_key, model, [{ role: 'system', content: CHAT_SYSTEM_PROMPT }, ...history], null);
     return;
   }
@@ -932,12 +1054,21 @@ async function apiMessages(req: IncomingMessage, res: ServerResponse, session: a
   // 登录态：落 user 消息 → 后端组装上下文 → 落 assistant。
   const uid = session.uid;
   const text = String(body.text || '');
+  if (bodyTextTooLarge(text)) { sendJson(res, 413, { error: { message: '消息文本过大' } }); return; }
   // attachments 线格式：[{hash,name}]（兼容旧版裸 hash 字符串，按无名处理）。
-  const attachments: { hash: string; name: string }[] = Array.isArray(body.attachments)
-    ? body.attachments
+  const rawAttachments: any[] = Array.isArray(body.attachments) ? body.attachments : [];
+  if (rawAttachments.length > MAX_ATTACHMENTS) {
+    sendJson(res, 413, { error: { message: `单条消息最多 ${MAX_ATTACHMENTS} 个附件` } }); return;
+  }
+  const attachments: { hash: string; name: string }[] = rawAttachments.length
+    ? rawAttachments
         .map((a: any) => (typeof a === 'string' ? { hash: a, name: '' } : { hash: a?.hash, name: String(a?.name || '').slice(0, 200) }))
         .filter((a: any) => typeof a.hash === 'string' && HASH_RE.test(a.hash))
     : [];
+  if (attachments.length !== rawAttachments.length) { sendJson(res, 400, { error: { message: '附件参数非法' } }); return; }
+  if (attachments.some((a) => !db.userOwnsBlob(uid, a.hash))) {
+    sendJson(res, 404, { error: { message: '附件不存在' } }); return;
+  }
   if (!text && !attachments.length) { sendJson(res, 400, { error: { message: '空消息' } }); return; }
   // 并发护栏：同一会话已有在途生成 → 拒绝（须在落 user 消息前，避免插一条没回复的）。
   const key = taskKey(uid, convId);
@@ -1172,9 +1303,16 @@ async function doubaoUserBalance(uid: number): Promise<number> {
 async function apiImages(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
   if (!session.api_key) { sendJson(res, 400, { error: { message: '尚未设置 key，请先在设置里选/贴一个 key' } }); return; }
   let body: any;
-  try { body = await readJsonBody(req); } catch { sendJson(res, 400, { error: { message: '请求体非法' } }); return; }
+  try { body = await readJsonBody(req, IMAGE_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
   const { model, prompt, size, quality } = body;
-  if (!prompt) { sendJson(res, 400, { error: { message: '缺少 prompt' } }); return; }
+  if (typeof prompt !== 'string' || !prompt) { sendJson(res, 400, { error: { message: '缺少 prompt' } }); return; }
+  if (typeof model !== 'string' || !model || model.length > 200 || bodyTextTooLarge(prompt)) {
+    sendJson(res, 413, { error: { message: '模型参数或 prompt 过大' } }); return;
+  }
+  const rawRefs: any[] = Array.isArray(body.refs) ? body.refs : [];
+  if (rawRefs.length > MAX_ATTACHMENTS) {
+    sendJson(res, 413, { error: { message: `参考图最多 ${MAX_ATTACHMENTS} 张` } }); return;
+  }
   const keyonly = session.uid === null;
 
   // 豆包生图：直连火山、需登录（要按 uid 扣费）、需配置齐全。keyonly / 未配置直接挡回。
@@ -1196,13 +1334,17 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   // 参考图统一成 [{buf,mime}]：keyonly 来自 dataURL；登录态来自 blob hash（并落 user 消息）。
   let refBlobs: { buf: Buffer; mime: string }[] = [];
   if (keyonly) {
-    refBlobs = (Array.isArray(body.refs) ? body.refs : [])
+    refBlobs = rawRefs
       .filter((u: any) => typeof u === 'string' && u.startsWith('data:'))
       .map((u: string) => { try { return dataUrlToBuf(u); } catch { return null; } })
       .filter(Boolean) as { buf: Buffer; mime: string }[];
   } else {
     const uid = session.uid;
-    const refs: string[] = Array.isArray(body.refs) ? body.refs.filter((h: any) => typeof h === 'string' && HASH_RE.test(h)) : [];
+    const refs: string[] = rawRefs.filter((h: any) => typeof h === 'string' && HASH_RE.test(h));
+    if (refs.length !== rawRefs.length) { sendJson(res, 400, { error: { message: '参考图参数非法' } }); return; }
+    if (refs.some((h) => !db.userOwnsBlob(uid, h))) {
+      sendJson(res, 404, { error: { message: '参考图不存在' } }); return;
+    }
     // 豆包：先扣费闸门 —— 组图按张数预扣（count 受参考图数与上限约束）；余额不足时 sub2api 拒绝
     // （balance 不能为负），此时不落 user 消息、不出图。出图后按实际成功张数退差额。
     if (doubao) {
@@ -1295,20 +1437,23 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
       if (buf && buf.length) bufs.push({ buf, mime: m });
     }
     if (!bufs.length) return 0;
-    const aid = newMsgId();
-    db.insertMessage({ id: aid, convId, uid, seq: db.nextSeq(convId, uid), role: 'assistant', kind: 'image', model, text: revised ? `*${revised}*` : '' });
     // 同一条消息内按内容去重：火山对「硬凑张数的组图」有时返回多张完全相同的图（字节一致 → 同 hash）。
     // 只落唯一图、只对唯一图计费（返回唯一张数，多预扣的在 finally 退差额）。
     const seen = new Set<string>();
+    const stored: string[] = [];
     bufs.forEach((b) => {
       const h = sha256(b.buf);
       if (seen.has(h)) return;             // 本条消息内重复图：跳过（不重复 link、不重复计费）
       seen.add(h);
-      if (!db.getBlobMeta(h)) { fs.writeFileSync(blobPath(h), b.buf); db.insertBlob(h, b.mime || 'image/png', b.buf.length); }
-      db.linkBlob(aid, h, seen.size - 1);
+      const persisted = persistBufferBlobForUser(uid, b.buf, b.mime || 'image/png');
+      if (persisted) stored.push(persisted);
     });
+    if (!stored.length) return 0;
+    const aid = newMsgId();
+    db.insertMessage({ id: aid, convId, uid, seq: db.nextSeq(convId, uid), role: 'assistant', kind: 'image', model, text: revised ? `*${revised}*` : '' });
+    stored.forEach((h, i) => db.linkBlob(aid, h, i));
     db.touchConv(uid, convId);
-    return seen.size;                       // 唯一图数 = 计费张数
+    return stored.length;                   // 成功持久化的唯一图数 = 计费张数
   };
 
   // ── keyonly：原直连路径（断开即掐、不落库）──
@@ -1393,34 +1538,157 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   }
 }
 
-// 上传 blob：sha256 内容寻址 + 去重。已存在直接返回，不重复写盘。
-async function apiBlobUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  let buf: Buffer;
-  try { buf = await collectBody(req); } catch (err: any) { sendJson(res, err.statusCode || 400, { error: { message: err.message } }); return; }
-  if (!buf.length) { sendJson(res, 400, { error: { message: '空请求体' } }); return; }
-  const mime = String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim();
-  const hash = sha256(buf);
-  if (!db.getBlobMeta(hash)) {
-    fs.writeFileSync(blobPath(hash), buf);
-    db.insertBlob(hash, mime, buf.length);
-  }
-  sendJson(res, 200, { hash, mime, size: buf.length });
+const activeBlobUploads = new Map<number, number>();
+let activeBlobUploadsTotal = 0;
+
+function uploadSlot(uid: number): boolean {
+  const userActive = activeBlobUploads.get(uid) || 0;
+  if (activeBlobUploadsTotal >= BLOB_MAX_CONCURRENT_TOTAL || userActive >= BLOB_MAX_CONCURRENT_PER_USER) return false;
+  activeBlobUploadsTotal++;
+  activeBlobUploads.set(uid, userActive + 1);
+  return true;
 }
 
-// 读 blob：必须校验当前 session.uid 拥有引用该 hash 的消息，否则 404（防越权读他人图）。
-function apiBlobGet(res: ServerResponse, session: any, hash: string): void {
+function releaseUploadSlot(uid: number): void {
+  activeBlobUploadsTotal = Math.max(0, activeBlobUploadsTotal - 1);
+  const n = (activeBlobUploads.get(uid) || 1) - 1;
+  if (n > 0) activeBlobUploads.set(uid, n); else activeBlobUploads.delete(uid);
+}
+
+function normalizedUploadMime(req: IncomingMessage, head: Buffer): string {
+  const imageMime = sniffSafeImageMime(head);
+  if (imageMime) return imageMime;
+  const claimed = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  return claimed.length <= 100 && /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(claimed)
+    ? claimed
+    : 'application/octet-stream';
+}
+
+async function streamBlobToTemp(req: IncomingMessage, tempPath: string): Promise<{ hash: string; size: number; head: Buffer }> {
+  const lengthHeader = req.headers['content-length'];
+  if (lengthHeader !== undefined) {
+    const declared = Number(lengthHeader);
+    if (!Number.isSafeInteger(declared) || declared < 0) throw Object.assign(new Error('Content-Length 非法'), { statusCode: 400 });
+    if (declared > BLOB_MAX_BYTES) {
+      throw Object.assign(new Error(`文件超过 ${Math.ceil(BLOB_MAX_BYTES / 1024 / 1024)}MB 上限`), { statusCode: 413 });
+    }
+  }
+
+  const digest = crypto.createHash('sha256');
+  let size = 0;
+  let head = Buffer.alloc(0);
+  let overLimit = false;
+  const meter = new Transform({
+    transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void) {
+      const b = Buffer.from(chunk);
+      if (overLimit || size + b.length > BLOB_MAX_BYTES) {
+        overLimit = true;
+        callback(null); // chunked 超限时停止落盘并排空请求，保证 413 能正常写回。
+        return;
+      }
+      size += b.length;
+      digest.update(b);
+      if (head.length < 32) head = Buffer.concat([head, b]).subarray(0, 32);
+      callback(null, b);
+    },
+  });
+  await pipeline(req, meter, fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+  if (overLimit) throw Object.assign(new Error(`文件超过 ${Math.ceil(BLOB_MAX_BYTES / 1024 / 1024)}MB 上限`), { statusCode: 413 });
+  if (!size) throw Object.assign(new Error('空请求体'), { statusCode: 400 });
+  return { hash: digest.digest('hex'), size, head };
+}
+
+// 上传 blob：仅账号登录态可用；流式写临时文件，hash/配额确认后以硬链接原子落盘。
+async function apiBlobUpload(req: IncomingMessage, res: ServerResponse, session: any): Promise<void> {
+  if (session.uid === null) { sendJson(res, 403, { error: { message: '贴 key 模式不允许服务端存储附件' } }); return; }
+  const uid = session.uid;
+  if (!uploadSlot(uid)) {
+    sendJson(res, 429, { error: { message: '同时上传的文件过多，请稍后重试' } }); return;
+  }
+
+  const tempPath = path.join(BLOB_DIR, `.upload-${crypto.randomBytes(16).toString('hex')}.tmp`);
+  let createdFile = false;
+  let hadMeta = false;
+  let finalPath: string | null = null;
+  let blobHash: string | null = null;
+  try {
+    const streamed = await streamBlobToTemp(req, tempPath);
+    blobHash = streamed.hash;
+    const mime = normalizedUploadMime(req, streamed.head);
+    finalPath = blobPath(streamed.hash);
+    hadMeta = !!db.getBlobMeta(streamed.hash);
+    try {
+      fs.linkSync(tempPath, finalPath); // 同目录硬链接：不覆盖已有内容，且不会暴露半写文件。
+      createdFile = true;
+    } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e;
+    }
+    fs.rmSync(tempPath, { force: true });
+
+    const claim = db.claimBlob(
+      uid,
+      streamed.hash,
+      mime,
+      streamed.size,
+      BLOB_MAX_COUNT_PER_USER,
+      BLOB_MAX_BYTES_PER_USER,
+      BLOB_MAX_BYTES_TOTAL
+    );
+    if (!claim.ok) {
+      if (createdFile && !hadMeta && !db.getBlobMeta(streamed.hash)) fs.rmSync(finalPath, { force: true });
+      const msg = claim.code === 'quota_count'
+        ? `附件数量已达账号上限（${claim.limit} 个）`
+        : claim.code === 'quota_total'
+          ? '服务器附件存储空间已满'
+          : `账号附件存储已达上限（${Math.round(claim.limit / 1024 / 1024)}MB）`;
+      sendJson(res, 413, { error: { message: msg, type: claim.code } });
+      return;
+    }
+    sendJson(res, 200, { hash: claim.hash, mime: claim.mime, size: claim.size });
+  } catch (err: any) {
+    if (createdFile && !hadMeta && finalPath && blobHash && !db.getBlobMeta(blobHash)) fs.rmSync(finalPath, { force: true });
+    if (err?.statusCode === 400 || err?.statusCode === 413) sendBodyError(res, err, err.message);
+    else {
+      console.error('[blob-upload] failed:', err?.message || err);
+      sendJson(res, 500, { error: { message: '附件上传失败' } });
+    }
+  } finally {
+    try { fs.rmSync(tempPath, { force: true }); } catch { /* already moved/removed */ }
+    releaseUploadSlot(uid);
+  }
+}
+
+// 读 blob：grant/消息归属鉴权；只有魔数确认的位图可内联，其他文件强制下载。
+async function apiBlobGet(res: ServerResponse, session: any, hash: string): Promise<void> {
   if (session.uid === null || !db.userOwnsBlob(session.uid, hash)) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
   const meta = db.getBlobMeta(hash);
   if (!meta) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
-  let buf: Buffer;
-  try { buf = fs.readFileSync(blobPath(hash)); } catch { sendJson(res, 404, { error: { message: 'blob 文件缺失' } }); return; }
-  res.writeHead(200, {
-    'Content-Type': meta.mime,
-    'Content-Length': String(buf.length),
-    'Cache-Control': 'public, max-age=31536000, immutable',  // 内容寻址，可永久强缓存
+
+  const filePath = blobPath(hash);
+  let stat: any;
+  let head = Buffer.alloc(32);
+  let bytesRead = 0;
+  try {
+    stat = await fs.promises.stat(filePath);
+    const fh = await fs.promises.open(filePath, 'r');
+    try { ({ bytesRead } = await fh.read(head, 0, head.length, 0)); } finally { await fh.close(); }
+  } catch {
+    sendJson(res, 404, { error: { message: 'blob 文件缺失' } }); return;
+  }
+  const imageMime = sniffSafeImageMime(head.subarray(0, bytesRead));
+  const headers: Record<string, string> = {
+    'Content-Type': imageMime || 'application/octet-stream',
+    'Content-Length': String(stat.size),
+    'Cache-Control': 'private, no-store, max-age=0',
+    'Content-Security-Policy': "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
+    'Cross-Origin-Resource-Policy': 'same-origin',
     ...SECURITY_HEADERS,
-  });
-  res.end(buf);
+  };
+  if (!imageMime) headers['Content-Disposition'] = `attachment; filename="${hash}"`;
+  res.writeHead(200, headers);
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
 }
 
 // /api/* 路由分发。返回 true 表示已接管。
@@ -1453,7 +1721,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
   if (url === '/api/keys/select' && method === 'POST') return apiKeysSelect(req, res, session);
   if (url === '/api/keys/manual' && method === 'POST') return apiKeysManual(req, res, session);
   if (url === '/api/models' && method === 'GET') return apiModels(res, session);
-  if (url === '/api/blobs' && method === 'POST') return apiBlobUpload(req, res);
+  if (url === '/api/blobs' && method === 'POST') return apiBlobUpload(req, res, session);
   const mBlob = /^\/api\/blobs\/([^/]+)$/.exec(url);
   if (mBlob && method === 'GET') {
     const h = decodeURIComponent(mBlob[1]);
@@ -1647,9 +1915,9 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
   }
 });
 
-// 生图 / 长流式响应都可能远超默认超时
-server.requestTimeout = 0;
-server.headersTimeout = 60 * 1000;
+// requestTimeout 只约束客户端送完请求体的时间；请求收完后的 SSE/生图响应不受影响。
+server.requestTimeout = REQUEST_TIMEOUT_MS;
+server.headersTimeout = Math.min(60 * 1000, REQUEST_TIMEOUT_MS);
 
 // 最后一道兜底：未预料到的异常 / Promise 拒绝只记录，不让进程无声退出。
 process.on('uncaughtException', (err) => {

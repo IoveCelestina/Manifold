@@ -2,5 +2,19 @@
 node_modules
 *.log
 .env
+.env.*
+
+# Runtime state and uploaded content must never enter an image layer.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+blobs/
+_blobs/
+**/blobs/
+**/_blobs/
+
 DEPLOY.md
 README.md
