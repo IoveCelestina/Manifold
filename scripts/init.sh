@@ -8,9 +8,12 @@
 #   scripts/init.sh                # 已存在的目标文件会逐个询问
 #   scripts/init.sh --force        # 全部覆盖，不问
 #
-# 依赖：bash 4+、openssl、sed、grep。Linux/macOS 通用。
+# 依赖：bash 4+、openssl、sed。Linux/macOS 通用。
 
 set -euo pipefail
+
+# Newly created secret files and temporary replacements are owner-only.
+umask 077
 
 FORCE=0
 for arg in "$@"; do
@@ -41,30 +44,47 @@ confirm_overwrite() {
   [[ "$resp" == "y" || "$resp" == "Y" ]]
 }
 
-# 替换 KEY=VAL 形式的一行；只改第一处匹配。VAL 通过 sed 的替换分隔符 | 写入，
-# 因此密钥本身（纯十六进制）不会和分隔符冲突。
+# 替换 KEY=VAL 形式的一行；只改第一处匹配。
+# 全程由 bash 写入，避免把密钥放进 sed/awk 的进程参数。
 set_env_value() {
   local file="$1" key="$2" value="$3"
-  # 找不到该 key 就当模板坏了，直接报错而不是悄悄追加
-  grep -qE "^${key}=" "$file" || { echo "模板里没有 $key= 这一行：$file" >&2; exit 1; }
-  sed -i.bak -E "s|^${key}=.*|${key}=${value}|" "$file"
-  rm -f "${file}.bak"
+  local line found=0 tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$found" -eq 0 && "$line" == "${key}="* ]]; then
+      printf '%s=%s\n' "$key" "$value" >>"$tmp"
+      found=1
+    else
+      printf '%s\n' "$line" >>"$tmp"
+    fi
+  done <"$file"
+
+  if [[ "$found" -ne 1 ]]; then
+    rm -f "$tmp"
+    echo "模板里没有 $key= 这一行：$file" >&2
+    exit 1
+  fi
+
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
 }
 
-# ─── 1. 生成全部密钥（字节数与 init.ps1 对齐） ─────────────────
-POSTGRES_PASSWORD=$(hex 24)
-JWT_SECRET=$(hex 32)
-TOTP_ENCRYPTION_KEY=$(hex 32)
-REDIS_PASSWORD=$(hex 24)
-ADMIN_PASSWORD=$(hex 12)
-
-# ─── 2. deploy/.env ────────────────────────────────────────
+# ─── deploy/.env ───────────────────────────────────────────
 ENV_TARGET="$DEPLOY_DIR/.env"
 ENV_TEMPLATE="$DEPLOY_DIR/.env.example"
 [[ -f "$ENV_TEMPLATE" ]] || { echo "找不到 $ENV_TEMPLATE" >&2; exit 1; }
 
 if confirm_overwrite "$ENV_TARGET"; then
+  # 仅在确定写文件后生成，避免无用密钥留在进程内存中。
+  POSTGRES_PASSWORD=$(hex 24)
+  JWT_SECRET=$(hex 32)
+  TOTP_ENCRYPTION_KEY=$(hex 32)
+  REDIS_PASSWORD=$(hex 24)
+  ADMIN_PASSWORD=$(hex 12)
+
   cp "$ENV_TEMPLATE" "$ENV_TARGET"
+  chmod 600 "$ENV_TARGET"
   set_env_value "$ENV_TARGET" POSTGRES_PASSWORD   "$POSTGRES_PASSWORD"
   set_env_value "$ENV_TARGET" JWT_SECRET          "$JWT_SECRET"
   set_env_value "$ENV_TARGET" TOTP_ENCRYPTION_KEY "$TOTP_ENCRYPTION_KEY"
@@ -75,16 +95,14 @@ else
   echo "[SKIP] $ENV_TARGET"
 fi
 
-# ─── 3. 打印关键凭据 ───────────────────────────────────────
-admin_email=$(grep -E '^ADMIN_EMAIL=' "$ENV_TARGET" | head -n1 | cut -d= -f2-)
+# Existing files are tightened too, including when overwrite was declined.
+[[ -f "$ENV_TARGET" ]] && chmod 600 "$ENV_TARGET"
 
 echo ""
-echo "=== 关键凭据（请妥善保存，下次脚本可能覆盖）==="
-echo "  Admin email           : $admin_email"
-echo "  Admin password        : $ADMIN_PASSWORD"
+echo "管理员凭据已写入 $ENV_TARGET（权限 600；密码不会输出到终端）。"
 echo ""
 echo "下一步："
 echo "  cd deploy"
 echo "  docker compose up -d"
-echo "  # 等 sub2api 健康检查通过后浏览器开 http://127.0.0.1:8080 用上面 admin 账号登录"
+echo "  # 等 sub2api 健康检查通过后浏览器开 http://127.0.0.1:8080"
 echo ""

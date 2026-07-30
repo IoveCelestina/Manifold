@@ -17,6 +17,16 @@ on:
 
 jobs:
 
+  # ─── 凭据/运行数据防误提交（零外部依赖，不回显命中内容） ──────────
+  secret-hygiene:
+    name: secret hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 扫描 Git 已跟踪文件
+        run: bash scripts/check-secrets.sh
+
   # ─── compose 校验：发现错别字 / 网络拼写 / required var 漏配 ──────
   compose-validate:
     name: docker compose config
