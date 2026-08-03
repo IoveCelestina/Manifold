@@ -1,4 +1,4 @@
-/* Manifold · 对话与生图 demo
+/* Manifold · 对话、图像与视频创作 demo
  *
  * 0b 起：浏览器不再持 key/JWT —— 凭证活在服务端 session，浏览器只有一个 httpOnly cookie。
  * 所有推理/登录/key 操作都走本服务同源 /api/*（cookie 自动随请求带上）。
@@ -8,11 +8,13 @@
 
 const $ = (id) => document.getElementById(id);
 const UPSTREAM = (window.__CHAT_CONFIG__ && window.__CHAT_CONFIG__.upstream) || '(未配置)';
+const DEFAULT_FILE_ACCEPT = $('file-input')?.getAttribute('accept') || 'image/*,text/*';
 
 const LS_MODEL = 'mfchat_model';      // 仅保留模型偏好（非敏感）；token/key 一律不进浏览器
 
 const IMAGE_MODEL_PREFIX = 'gpt-image';
 const FALLBACK_IMAGE_MODEL = 'gpt-image-2';
+const VIDEO_MODEL = 'doubao-seedance-2-0-260128';
 // 豆包生图模型能力表（sub2api /v1/models 不返回，登录态前端手动挂；后端 apiImages 直连火山出图+扣费）。
 // 每个模型只暴露它支持的参数：分辨率档 sizes、输出格式 formats（仅 5.0 lite 可 png/jpeg，4.5/4.0 固定 jpeg）。
 // 计费在后端（按模型单价×出图张数），前端不涉及金额。
@@ -40,6 +42,7 @@ const DOUBAO_PIXELS = {
 };
 // 是否图片生成模型：gpt-image 系 或 豆包 seedream 系
 function isImageModelId(id) { const s = id || ''; return s.startsWith(IMAGE_MODEL_PREFIX) || s.startsWith('doubao-seedream'); }
+function isVideoModelId(id) { return id === VIDEO_MODEL; }
 // 下拉 / 气泡里的友好名（豆包显示 Seedream x.x，其它用原始 id）
 function imageModelLabel(id) { return DOUBAO_CAPS[id]?.label || id; }
 const MAX_ATTACH = 4;
@@ -94,7 +97,7 @@ const state = {
   currentId: null,
   models: [],
   attachments: [],                  // [{dataUrl}]
-  gens: new Map(),                  // convId → AbortController —— 每个对话独立的进行中生成（支持多对话并行）
+  gens: new Map(),                  // convId → {ctrl,kind} —— 每个对话独立的进行中生成
   keysCache: null,                  // 账户 key 列表缓存
 };
 let genSeq = 0;
@@ -285,14 +288,14 @@ async function openConv(id) {
   }
 }
 
-// 重连在途生成：刷新/重开会话后接上后台还没跑完的回复（聊天逐字 / 生图逐帧）。
+// 重连在途生成：刷新/重开会话后接上后台还没跑完的回复（聊天、生图或视频任务）。
 // 后端已把生成做成脱离连接的任务，这里只是重新订阅；结束后从 DB 重拉同步规范状态。
 async function reconnectInflight(conv) {
   const kind = conv._inflight?.kind;
   conv._inflight = null;                 // 只触发一次
   if (!kind || state.gens.has(conv.id)) return;
 
-  const ctrl = beginGen(conv);
+  const ctrl = beginGen(conv, kind);
 
   // 临时占位消息（进行中）；跑完从 DB 重拉规范状态覆盖。数据驱动 → 期间可自由切换对话。
   const aMsg = { role: 'assistant', kind, model: '', text: '', images: [], _genid: newGenId(), _pending: true, _meta: '接上后台生成…' };
@@ -305,6 +308,12 @@ async function reconnectInflight(conv) {
     if (res.status !== 204 && res.ok && res.body) {
       if (kind === 'image') {
         await readImageSse(res, (imgs) => { aMsg.images = imgs; patchGen(conv, aMsg); });
+      } else if (kind === 'video') {
+        await readVideoSse(res, (event) => {
+          aMsg._status = event.status;
+          aMsg._meta = event.message || videoStatusLabel(event.status);
+          patchGen(conv, aMsg);
+        });
       } else {
         let last = 0;
         await pumpChatSse(res, (d) => {
@@ -607,20 +616,21 @@ $('settings-mask').addEventListener('click', (e) => {
 
 async function loadModels() {
   const sel = $('model-select');
-  if (!hasKey()) {
-    sel.innerHTML = `<option value="${FALLBACK_IMAGE_MODEL}">${FALLBACK_IMAGE_MODEL}</option>`;
-    syncComposerMode();
-    return;
-  }
   let ids = [];
-  try {
-    const res = await fetch('/api/models');
-    const json = await res.json();
-    if (res.ok) ids = (json.data || []).map((m) => m.id).filter(Boolean).sort();
-  } catch { /* 拉不到就用兜底列表 */ }
-  if (!ids.includes(FALLBACK_IMAGE_MODEL)) ids.push(FALLBACK_IMAGE_MODEL);
+  if (hasKey()) {
+    try {
+      const res = await fetch('/api/models');
+      const json = await res.json();
+      if (res.ok) ids = (json.data || []).map((m) => m.id).filter(Boolean).sort();
+    } catch { /* 拉不到就用兜底列表 */ }
+    if (!ids.includes(FALLBACK_IMAGE_MODEL)) ids.push(FALLBACK_IMAGE_MODEL);
+  }
   // 登录态（有 uid，可按账号扣费）才挂豆包生图模型；keyonly 无法扣费，不显示。
-  if (useServer()) for (const id of DOUBAO_IMAGE_MODELS) if (!ids.includes(id)) ids.push(id);
+  if (useServer()) {
+    if (hasKey()) for (const id of DOUBAO_IMAGE_MODELS) if (!ids.includes(id)) ids.push(id);
+    if (!ids.includes(VIDEO_MODEL)) ids.push(VIDEO_MODEL); // 视频只用服务端现有方舟 Key，不要求用户另选 key
+  }
+  if (!ids.length) ids.push(FALLBACK_IMAGE_MODEL);
   state.models = ids;
 
   const saved = localStorage.getItem(LS_MODEL);
@@ -628,7 +638,7 @@ async function loadModels() {
   for (const id of ids) {
     const opt = document.createElement('option');
     opt.value = id;
-    opt.textContent = isImageModelId(id) ? `${imageModelLabel(id)} ✦图` : id;
+    opt.textContent = isVideoModelId(id) ? 'Seedance 2.0 ▷视频' : (isImageModelId(id) ? `${imageModelLabel(id)} ✦图` : id);
     sel.appendChild(opt);
   }
   sel.value = saved && ids.includes(saved) ? saved : ids[0];
@@ -642,16 +652,22 @@ $('model-select').addEventListener('change', () => {
 
 function currentModel() { return $('model-select').value; }
 function isImageMode() { return isImageModelId(currentModel()); }
+function isVideoMode() { return isVideoModelId(currentModel()); }
 
 function syncComposerMode() {
   const img = isImageMode();
+  const video = isVideoMode();
   $('composer').classList.toggle('mode-image', img);
+  $('composer').classList.toggle('mode-video', video);
   $('imagegen-controls').classList.toggle('hidden', !img);
-  $('input-box').placeholder = img ? '描述你想生成的画面…（可附参考图改图）' : '输入消息…';
+  $('videogen-controls').classList.toggle('hidden', !video);
+  $('input-box').placeholder = video ? '描述镜头、动作、节奏与声音…（可附参考图）' : (img ? '描述你想生成的画面…（可附参考图改图）' : '输入消息…');
+  $('file-input').accept = (img || video) ? 'image/*' : DEFAULT_FILE_ACCEPT;
+  $('btn-attach').title = (img || video) ? '上传参考图片' : '上传图片或文本附件';
   syncComposer();   // 按钮文字/状态跟随当前对话（生成中显示「停止」，否则「生成/发送」）
-  $('composer-hint').textContent = img
-    ? '生图模式 · 直接描述 = 文生图 · 附图 = 按参考图改图'
-    : 'Enter 发送 · Shift+Enter 换行';
+  $('composer-hint').textContent = video
+    ? '视频任务会在后台生成 · 完成后自动保存到本对话 · 按实际 Tokens 结算'
+    : (img ? '生图模式 · 直接描述 = 文生图 · 附图 = 按参考图改图' : 'Enter 发送 · Shift+Enter 换行');
   syncImagegenControls();   // 按当前模型出对分辨率/格式档、显隐 quality/输出格式
   syncModelPill();          // 移动端顶栏药丸跟随当前模型
 }
@@ -659,8 +675,9 @@ function syncComposerMode() {
 /* ── 移动端：顶栏模型药丸 + 底部模型选择弹层（桌面用 header 的 select，不触发弹层）── */
 function syncModelPill() {
   const el = $('model-pill-name');
-  if (el) el.textContent = currentModel() || '模型';
+  if (el) el.textContent = isVideoMode() ? 'Seedance 2.0' : (isImageMode() ? imageModelLabel(currentModel()) : (currentModel() || '模型'));
   $('model-pill')?.classList.toggle('is-image', isImageMode());
+  $('model-pill')?.classList.toggle('is-video', isVideoMode());
 }
 
 function renderModelSheet() {
@@ -672,13 +689,14 @@ function renderModelSheet() {
   for (const opt of sel.options) {
     const id = opt.value;
     const isImg = isImageModelId(id);
+    const isVideo = isVideoModelId(id);
     const btn = document.createElement('button');
-    btn.className = 'sheet-mdl ' + (isImg ? 'is-image' : 'is-chat') + (id === cur ? ' sel' : '');
+    btn.className = 'sheet-mdl ' + (isVideo ? 'is-video' : (isImg ? 'is-image' : 'is-chat')) + (id === cur ? ' sel' : '');
     btn.innerHTML =
       '<span class="sheet-mdl-dot"></span>' +
       '<span class="sheet-mdl-name"></span>' +
       '<span class="sheet-mdl-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>';
-    btn.querySelector('.sheet-mdl-name').textContent = imageModelLabel(id);
+    btn.querySelector('.sheet-mdl-name').textContent = isVideo ? 'Seedance 2.0' : imageModelLabel(id);
     btn.addEventListener('click', () => {
       if (sel.value !== id) {
         sel.value = id;
@@ -840,10 +858,13 @@ function renderConvList() {
     del.textContent = '×';
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
-      // 删除正在生成的对话：先停它的生成，再删
-      if (state.gens.has(conv.id)) { cancelGen(conv.id); state.gens.delete(conv.id); }
+      if (state.gens.has(conv.id)) {
+        alert('该对话仍在生成中，请先停止或取消任务，再删除。');
+        return;
+      }
+      try { await store.del(conv.id); }
+      catch (err) { alert(`删除失败：${err?.message || err}`); return; }
       state.convs = state.convs.filter((c) => c.id !== conv.id);
-      await store.del(conv.id).catch(() => {});
       if (state.currentId === conv.id) {
         state.currentId = state.convs[0]?.id || null;
         renderMessages();
@@ -923,19 +944,27 @@ function buildEmptyState() {
       <ellipse cx="24" cy="24" rx="19" ry="4.5" fill="none"/>
     </svg>
     <p class="empty-title">开始一段对话</p>
-    <p class="empty-hint">上传图片让模型识图，或在模型选择器里切到
-      <button class="inline-link mono">${FALLBACK_IMAGE_MODEL}</button> 描述你想生成的画面</p>`;
-  div.querySelector('.inline-link').addEventListener('click', () => {
+    <p class="empty-hint">上传图片让模型识图，切到
+      <button class="inline-link mono" data-mode="image">${FALLBACK_IMAGE_MODEL}</button> 创作画面，或用
+      <button class="inline-link mono video-link" data-mode="video">Seedance 2.0</button> 生成视频</p>`;
+  div.querySelector('[data-mode="image"]').addEventListener('click', () => {
     const sel = $('model-select');
     const target = state.models.find((m) => m.startsWith(IMAGE_MODEL_PREFIX)) || FALLBACK_IMAGE_MODEL;
     sel.value = target;
     sel.dispatchEvent(new Event('change'));
     $('input-box').focus();
   });
+  div.querySelector('[data-mode="video"]')?.addEventListener('click', () => {
+    const sel = $('model-select');
+    if (![...sel.options].some((o) => o.value === VIDEO_MODEL)) return;
+    sel.value = VIDEO_MODEL;
+    sel.dispatchEvent(new Event('change'));
+    $('input-box').focus();
+  });
   return div;
 }
 
-// 归一化一条消息的附件 → [{kind:'image'|'file', name, url, mime}]。
+// 归一化一条消息的附件 → [{kind:'image'|'video'|'file', name, url, mime}]。
 // 来源三态：① 登录态持久化 m.blobs=[{hash,name,mime,size}]（兼容旧裸 hash 字符串，按图片）；
 //           ② 本地乐观/keyonly m.atts=[{kind,name,mime,dataUrl?}]；③ 旧 IndexedDB m.images=[dataUrl]。
 function msgAttachments(m) {
@@ -944,9 +973,9 @@ function msgAttachments(m) {
       const hash = typeof b === 'string' ? b : b.hash;
       const mime = typeof b === 'string' ? 'image/*' : (b.mime || '');
       const url = `/api/blobs/${encodeURIComponent(hash)}`;
-      return mime.startsWith('image/') || mime === 'image/*'
-        ? { kind: 'image', name: (b.name || ''), url, mime }
-        : { kind: 'file', name: (b.name || hash), url, mime };
+      if (mime.startsWith('image/') || mime === 'image/*') return { kind: 'image', name: (b.name || ''), url, mime };
+      if (mime.startsWith('video/')) return { kind: 'video', name: (b.name || 'Seedance 成片'), url, mime };
+      return { kind: 'file', name: (b.name || hash), url, mime };
     });
   }
   if (m.atts?.length) {
@@ -978,10 +1007,10 @@ function buildMsgEl(m) {
     body.textContent = m.text || '';
     div.appendChild(body);
   } else {
-    div.className = 'msg msg-assistant' + (m.kind === 'image' ? ' is-image' : '');
+    div.className = 'msg msg-assistant' + (m.kind === 'image' ? ' is-image' : (m.kind === 'video' ? ' is-video' : ''));
     if (m._genid) div.dataset.genid = m._genid;     // 生成中消息的稳定定位 id（供 patchGen 续画）
     div.innerHTML = `<div class="msg-role">
-        <span class="msg-role-glyph">${m.kind === 'image' ? '✦' : '∴'}</span>
+        <span class="msg-role-glyph">${m.kind === 'image' ? '✦' : (m.kind === 'video' ? '▷' : '∴')}</span>
         <span class="msg-role-name"></span>
       </div>`;
     div.querySelector('.msg-role-name').textContent = m.model || 'assistant';
@@ -997,6 +1026,10 @@ function buildMsgEl(m) {
         pend.innerHTML = `<div class="gen-rings"><span></span><span></span><span></span></div><div class="gen-pending-text">${aImgs.length ? '继续生成中…' : ('正在生成 ' + (m._meta || ''))}</div>`;
         body.appendChild(pend);
       }
+    } else if (m.kind === 'video') {
+      const videoAtt = msgAttachments(m).find((a) => a.kind === 'video');
+      if (videoAtt) body.appendChild(buildVideoItem(videoAtt, m.text));
+      if (m._pending) body.appendChild(buildVideoPending(m._meta || '准备任务'));
     } else {
       body.innerHTML = mdRender(m.text || '') + (m._pending ? '<span class="stream-caret"></span>' : '');
     }
@@ -1005,6 +1038,34 @@ function buildMsgEl(m) {
   // 一行小字：用户消息=发送时间，助手消息=回复完成时间（流式中还没 createdAt，完成后再补）。
   setMsgTime(div, m.createdAt);
   return div;
+}
+
+function buildVideoPending(label) {
+  const el = document.createElement('div');
+  el.className = 'video-pending';
+  el.innerHTML = '<div class="video-time-rail" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div><div class="video-pending-copy"><span class="video-live-dot"></span><span class="video-pending-text"></span></div>';
+  el.querySelector('.video-pending-text').textContent = label;
+  return el;
+}
+
+function buildVideoItem(att, spec) {
+  const wrap = document.createElement('figure');
+  wrap.className = 'msg-video-wrap';
+  const video = document.createElement('video');
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+  video.src = att.url;
+  video.setAttribute('aria-label', att.name || 'Seedance 生成视频');
+  wrap.appendChild(video);
+  const cap = document.createElement('figcaption');
+  const meta = document.createElement('span');
+  meta.className = 'video-spec mono';
+  meta.textContent = spec || 'Seedance 2.0';
+  const dl = document.createElement('a');
+  dl.className = 'video-download'; dl.href = att.url; dl.download = att.name || `seedance-${Date.now()}.mp4`; dl.textContent = '下载 MP4';
+  cap.append(meta, dl); wrap.appendChild(cap);
+  return wrap;
 }
 
 // 单张图片项（.msg-img-wrap）。buildImages 与 patchGen 增量追加共用 —— 已解码的图不被重建。
@@ -1088,6 +1149,8 @@ async function addFiles(fileList) {
         const dataUrl = await fileToDataUrl(file);
         state.attachments.push({ kind: 'image', dataUrl, name: file.name || '', mime: file.type || 'image/png', size: file.size });
         added++;
+      } else if (isImageMode() || isVideoMode()) {
+        alert(`当前创作模式只接受参考图片：${file.name || '未知文件'}`);
       } else if (isTextLike(file.type, file.name || '')) {
         if (file.size > FILE_MAX_BYTES) { alert(`文件「${file.name}」超过 ${fmtBytes(FILE_MAX_BYTES)}，暂不支持。`); continue; }
         const text = await fileToText(file);
@@ -1243,19 +1306,21 @@ function onSend() {
   }
   const text = inputBox.value.trim();
   if (!text && !state.attachments.length) return;
-  if (!hasKey()) { openSettings(); return; }
+  if (!hasKey() && !isVideoMode()) { openSettings(); return; }
   if (isImageMode() && !text) return; // 生图必须有描述
-  if (isImageMode()) sendImageGen(text);
+  if (isVideoMode() && !text) return;
+  if (isVideoMode()) sendVideoGen(text);
+  else if (isImageMode()) sendImageGen(text);
   else sendChat(text);
 }
 
 // 发送按钮跟随「当前对话是否在生成」（多对话并行：切到哪个对话，按钮就反映哪个的状态）。
 function syncComposer() {
   const cur = currentConv();
-  const gen = !!(cur && state.gens.has(cur.id));
+  const active = cur ? state.gens.get(cur.id) : null;
   const btn = $('btn-send');
-  if (gen) { btn.textContent = '停止'; btn.classList.add('stop'); }
-  else { btn.classList.remove('stop'); btn.textContent = isImageMode() ? '生成' : '发送'; }
+  if (active) { btn.textContent = active.kind === 'video' ? '取消任务' : '停止'; btn.classList.add('stop'); }
+  else { btn.classList.remove('stop'); btn.textContent = isVideoMode() ? '生成视频' : (isImageMode() ? '生成' : '发送'); }
 }
 // 生成中更新了某对话的消息数据后，刷新其 DOM —— 仅当正在看该对话时（否则只留数据，切回 renderMessages 会显示）。
 function patchGen(conv, aMsg) {
@@ -1270,7 +1335,11 @@ function patchGen(conv, aMsg) {
 function updateGenEl(el, m) {
   const body = el.querySelector('.msg-body');
   if (!body) return;
-  if (m.kind !== 'image') {
+  if (m.kind === 'video') {
+    const text = body.querySelector('.video-pending-text');
+    if (text) text.textContent = m._meta || videoStatusLabel(m._status);
+    if (!m._pending) body.querySelector('.video-pending')?.remove();
+  } else if (m.kind !== 'image') {
     body.innerHTML = mdRender(m.text || '') + (m._pending ? '<span class="stream-caret"></span>' : '');
   } else {
     const pend = body.querySelector('.gen-pending');
@@ -1293,9 +1362,9 @@ function updateGenEl(el, m) {
   if (m.createdAt) setMsgTime(el, m.createdAt);
 }
 // 起一个生成：建 AbortController、登记到该对话（供停止/切换/并发护栏用）、刷新按钮态。返回 ctrl。
-function beginGen(conv) {
+function beginGen(conv, kind = 'chat') {
   const ctrl = new AbortController();
-  state.gens.set(conv.id, ctrl);
+  state.gens.set(conv.id, { ctrl, kind });
   syncComposer();
   return ctrl;
 }
@@ -1306,7 +1375,7 @@ function endGen(conv) {
 }
 // 停止某对话的生成：本地 abort + 通知后端取消（否则后端后台任务不会 done、下一条被 409 挡）。
 function cancelGen(convId) {
-  state.gens.get(convId)?.abort();
+  state.gens.get(convId)?.ctrl.abort();
   if (useServer()) fetch(`/api/conversations/${encodeURIComponent(convId)}/stream`, { method: 'DELETE' }).catch(() => {});
 }
 // 从对话消息里移除某条（进行中占位消息收尾/出错时用）。
@@ -1316,7 +1385,7 @@ function dropMsg(conv, aMsg) {
 }
 // 中止所有对话的进行中生成（登出/会话失效时用）。仅断本地观看，后台任务由后端自行收尾。
 function abortAllGens() {
-  for (const ctrl of state.gens.values()) { try { ctrl.abort(); } catch { /* ignore */ } }
+  for (const gen of state.gens.values()) { try { gen.ctrl.abort(); } catch { /* ignore */ } }
   state.gens.clear();
 }
 
@@ -1422,14 +1491,14 @@ async function runGen(conv, aMsg, ctrl, doRequest, runReader) {
     patchGen(conv, aMsg);
     // 登录态生图完成：流式用的是 base64 dataURL（组图多张 4K 会撑爆浏览器解码内存导致破图，且
     // dataURL 懒加载不生效）。从 DB 重拉规范状态 → 换成 blob 链接（懒加载生效、只解码可见的、已去重）。
-    if (aMsg.kind === 'image' && useServer()) {
+    if ((aMsg.kind === 'image' || aMsg.kind === 'video') && useServer()) {
       conv.messages = null;
       await ensureMessages(conv);
       if (state.currentId === conv.id) renderMessages();
     }
   } catch (err) {
     dropMsg(conv, aMsg);
-    const kept = aMsg.kind === 'image' ? aMsg.images.length : aMsg.text;
+    const kept = aMsg.kind === 'image' ? aMsg.images.length : (aMsg.kind === 'video' ? false : aMsg.text);
     if (err.name === 'AbortError') {
       if (kept) {                                       // 手动停止：保留已生成部分
         aMsg._pending = false;
@@ -1452,7 +1521,7 @@ async function sendChat(text) {
   if (state.gens.has(conv.id)) return;              // 该对话已在生成（前端侧并发护栏）
   const model = currentModel();
   const atts = state.attachments.slice();           // 发送前取（pushUserMessage 会清空 attachments）
-  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
+  const ctrl = beginGen(conv, 'chat');              // 同步占位：防并发双击 + 让按钮/切换立即反映
 
   await ensureMessages(conv);
   pushUserMessage(conv, text);                      // 发送时一定在当前对话 → 直接乐观渲染 user 气泡
@@ -1573,7 +1642,7 @@ async function sendImageGen(prompt) {
     promptMode = (caps.fast && $('promptmode-select').value === 'fast') ? 'fast' : 'standard';
     if (count > 1) sizeLabel += ` · ×${count}`;
   }
-  const ctrl = beginGen(conv);                      // 同步占位：防并发双击 + 让按钮/切换立即反映
+  const ctrl = beginGen(conv, 'image');             // 同步占位：防并发双击 + 让按钮/切换立即反映
 
   await ensureMessages(conv);
   const userMsg = pushUserMessage(conv, prompt);
@@ -1621,6 +1690,83 @@ async function sendImageGen(prompt) {
     aMsg.text = revised ? `*${revised}*` : '';
     aMsg.meta = `${sizeLabel} · ${Math.round((Date.now() - t0) / 1000)}s`;
   };
+  await runGen(conv, aMsg, ctrl, doRequest, runReader);
+}
+
+/* —— 视频生成（Seedance 2.0）—— */
+function videoStatusLabel(status) {
+  return ({
+    submitting: '正在提交方舟任务', queued: '排队中', running: '正在生成镜头',
+    finalizing: '成片生成完毕，正在安全保存', succeeded: '成片已保存',
+    cancelled: '任务已取消', failed: '生成失败',
+  })[status] || '后台生成中';
+}
+
+async function readVideoSse(res, onStatus) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', sawDone = false;
+  const handleLine = (line) => {
+    const t = line.trim();
+    if (!t.startsWith('data:')) return;
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') { sawDone = true; return; }
+    if (!payload) return;
+    let event;
+    try { event = JSON.parse(payload); } catch { return; }
+    if (event.error) throw new Error(event.error.message || '视频生成失败');
+    if (event.type === 'video.status') onStatus?.(event);
+  };
+  while (!sawDone) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n'); buf = lines.pop() || '';
+    for (const line of lines) handleLine(line);
+  }
+  buf += decoder.decode();
+  for (const line of buf.split('\n')) if (line.trim()) handleLine(line);
+  if (!sawDone) throw new Error('视频进度连接中断；任务仍会在后台继续，可刷新本对话接回');
+  reader.cancel().catch(() => {});
+}
+
+async function sendVideoGen(prompt) {
+  if (!prompt || !useServer()) return;
+  const conv = currentConv() || newConv();
+  if (state.gens.has(conv.id)) return;
+  const resolution = $('video-resolution').value;
+  const ratio = $('video-ratio').value;
+  const duration = Number($('video-duration').value);
+  const ctrl = beginGen(conv, 'video');
+
+  await ensureMessages(conv);
+  const userMsg = pushUserMessage(conv, prompt);
+  const refImages = (userMsg.atts || []).filter((a) => a.kind === 'image').map((a) => a.dataUrl);
+  await persistConv(conv);
+
+  const aMsg = {
+    role: 'assistant', kind: 'video', model: VIDEO_MODEL, text: '',
+    _genid: newGenId(), _pending: true, _status: 'submitting',
+    _meta: `${resolution} · ${duration}s · ${ratio} · 准备提交`,
+  };
+  const clientRequestId = crypto.randomUUID
+    ? crypto.randomUUID()
+    : `vreq_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const doRequest = async (signal) => {
+    const refs = refImages.length ? await Promise.all(refImages.map(uploadDataUrl)) : [];
+    return fetch(`/api/conversations/${encodeURIComponent(conv.id)}/videos`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+      body: JSON.stringify({
+        model: VIDEO_MODEL, prompt, resolution, ratio, duration, refs,
+        client_request_id: clientRequestId,
+      }),
+    });
+  };
+  const runReader = (res, repaint) => readVideoSse(res, (event) => {
+    aMsg._status = event.status;
+    aMsg._meta = event.message || videoStatusLabel(event.status);
+    repaint();
+  });
   await runGen(conv, aMsg, ctrl, doRequest, runReader);
 }
 

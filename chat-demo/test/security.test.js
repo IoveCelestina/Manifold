@@ -13,12 +13,18 @@ const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
   'base64',
 );
+const MP4_FIXTURE = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x10]), Buffer.from('ftyp'), Buffer.from('isom0000'),
+]);
 
 let upstream;
 let app;
 let appBase;
 let tempDir;
 let appOutput = '';
+const balanceOps = [];
+let videoCreatePayload = null;
+let videoCreateCount = 0;
 
 function json(res, status, body) {
   const data = Buffer.from(JSON.stringify(body));
@@ -33,6 +39,12 @@ async function consume(req) {
   for await (const _chunk of req) {
     // The fixture only needs to drain request bodies.
   }
+}
+
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 
 function listen(server) {
@@ -189,6 +201,39 @@ before(async () => {
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/v1/admin/users/42') {
+      json(res, 200, { code: 0, data: { balance: 100 } });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/admin/users/42/balance') {
+      balanceOps.push({ body: await readJson(req), idem: req.headers['idempotency-key'] });
+      json(res, 200, { code: 0, data: { balance: 100 } });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/contents/generations/tasks') {
+      videoCreateCount++;
+      videoCreatePayload = await readJson(req);
+      json(res, 200, { id: 'fixture-video-task' });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/contents/generations/tasks/fixture-video-task') {
+      json(res, 200, {
+        id: 'fixture-video-task', status: 'succeeded',
+        content: { video_url: `http://${req.headers.host}/fixture-video.mp4` },
+        usage: { completion_tokens: 250000 },
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/fixture-video.mp4') {
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': String(MP4_FIXTURE.length) });
+      res.end(MP4_FIXTURE);
+      return;
+    }
+
     await consume(req);
     json(res, 404, { error: { message: 'fixture route not found' } });
   });
@@ -203,6 +248,12 @@ before(async () => {
       ...process.env,
       PORT: String(appPort),
       SUB2API_BASE: `http://127.0.0.1:${upstreamPort}`,
+      ARK_BASE: `http://127.0.0.1:${upstreamPort}`,
+      ARK_API_KEY: 'fixture-ark-key',
+      SUB2API_ADMIN_KEY: 'fixture-admin-key',
+      VIDEO_POLL_INTERVAL_MS: '20',
+      SEEDANCE_BASE_TOKENS_480P_5S: '250000',
+      SEEDANCE_PRICE_USD_PER_M_TOKENS: '46',
       DB_PATH: path.join(tempDir, 'manifold.test.db'),
       BLOB_DIR: path.join(tempDir, 'blobs'),
       BLOB_MAX_BYTES: String(BLOB_LIMIT),
@@ -286,5 +337,70 @@ describe('security boundaries', { concurrency: false }, () => {
     assert.match(res.headers.get('cache-control') || '', /(?:^|,)\s*private\b/i);
     assert.match(res.headers.get('cache-control') || '', /(?:^|,)\s*no-store\b/i);
     assert.deepEqual(Buffer.from(await res.arrayBuffer()), PNG_1X1);
+  });
+
+  test('key-only sessions cannot spend the shared Ark video key', async () => {
+    const login = await keyLogin(VALID_KEY);
+    assert.equal(login.status, 200, await login.text());
+    const res = await fetch(`${appBase}/api/conversations/c_keyonly_video/videos`, {
+      method: 'POST',
+      headers: { cookie: cookieFrom(login), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'doubao-seedance-2-0-260128', prompt: 'fixture', resolution: '480p', ratio: '16:9', duration: 4,
+        refs: [], client_request_id: 'fixture-keyonly-video-001',
+      }),
+    });
+    assert.equal(res.status, 403, await res.text());
+    assert.equal(videoCreateCount, 0);
+  });
+
+  test('Seedance tasks are idempotent, settled by actual tokens, and served as private ranged MP4', async () => {
+    const cookie = await accountLogin();
+    const convId = 'c_security_video';
+    const body = {
+      model: 'doubao-seedance-2-0-260128', prompt: '一束光穿过雨夜中的旧车站',
+      resolution: '720p', ratio: '16:9', duration: 5, refs: [],
+      client_request_id: 'fixture-video-request-001',
+    };
+    const create = await fetch(`${appBase}/api/conversations/${convId}/videos`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const events = await create.text();
+    assert.equal(create.status, 200, events);
+    assert.match(events, /"status":"succeeded"/);
+    assert.match(events, /data: \[DONE\]/);
+    assert.equal(videoCreateCount, 1);
+    assert.equal(videoCreatePayload.model, body.model);
+    assert.match(videoCreatePayload.content[0].text, /--resolution 720p/);
+
+    const convRes = await fetch(`${appBase}/api/conversations/${convId}`, { headers: { cookie } });
+    const convText = await convRes.text();
+    assert.equal(convRes.status, 200, convText);
+    const conv = JSON.parse(convText);
+    const videoMessage = conv.messages.find((m) => m.kind === 'video');
+    assert.ok(videoMessage, 'completed task must persist a video message');
+    assert.equal(videoMessage.blobs.length, 1);
+    assert.equal(videoMessage.blobs[0].mime, 'video/mp4');
+
+    const blobUrl = `${appBase}/api/blobs/${videoMessage.blobs[0].hash}`;
+    const ranged = await fetch(blobUrl, { headers: { cookie, range: 'bytes=4-11' } });
+    assert.equal(ranged.status, 206);
+    assert.equal(ranged.headers.get('content-type'), 'video/mp4');
+    assert.equal(ranged.headers.get('accept-ranges'), 'bytes');
+    assert.equal(ranged.headers.get('content-range'), `bytes 4-11/${MP4_FIXTURE.length}`);
+    assert.deepEqual(Buffer.from(await ranged.arrayBuffer()), MP4_FIXTURE.subarray(4, 12));
+
+    assert.equal(balanceOps.length, 2);
+    assert.deepEqual(balanceOps.map((op) => op.body.operation), ['subtract', 'add']);
+    assert.equal(balanceOps[0].body.balance, 25.875); // 720P 预授权：250k × 2.25 × 46/M
+    assert.equal(balanceOps[1].body.balance, 14.375); // 实际 250k Tokens = 11.5，退差额
+    assert.notEqual(balanceOps[0].idem, balanceOps[1].idem);
+
+    const replay = await fetch(`${appBase}/api/conversations/${convId}/videos`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(replay.status, 200, await replay.text());
+    assert.equal(videoCreateCount, 1, 'same client_request_id must not create another Ark task');
+    assert.equal(balanceOps.length, 2, 'idempotent replay must not charge again');
   });
 });

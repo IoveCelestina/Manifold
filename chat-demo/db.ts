@@ -321,6 +321,36 @@ db.exec(`
   JOIN blobs b ON b.hash = mb.blob_hash
 `);
 
+// ── 视频生成任务 ─────────────────────────────────────────────────────
+// 方舟视频接口是异步任务。任务状态与计费快照必须落库，进程重启后才能继续轮询，
+// 也避免浏览器重试时重复创建一笔昂贵的生成任务。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS video_tasks (
+    id                  TEXT PRIMARY KEY,
+    uid                 INTEGER NOT NULL,
+    conv_id             TEXT NOT NULL,
+    client_request_id   TEXT NOT NULL,
+    provider_task_id    TEXT,
+    model               TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    resolution          TEXT NOT NULL,
+    ratio               TEXT NOT NULL,
+    duration            INTEGER NOT NULL,
+    reserved_usd        REAL NOT NULL,
+    price_per_m_tokens  REAL NOT NULL,
+    billing_status      TEXT NOT NULL DEFAULT 'pending',
+    video_blob_hash     TEXT,
+    completion_tokens   INTEGER,
+    actual_usd          REAL,
+    error               TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    UNIQUE (uid, client_request_id)
+  );
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_video_tasks_owner_status ON video_tasks(uid, status, updated_at DESC)');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_video_tasks_provider ON video_tasks(provider_task_id) WHERE provider_task_id IS NOT NULL');
+
 interface ConvMetaRow { id: string; title: string; createdAt: number; updatedAt: number; }
 interface BlobRef { hash: string; name: string; mime: string; size: number; }
 interface MessageOut {
@@ -330,6 +360,17 @@ interface MessageOut {
 interface InsertMessageInput {
   id: string; convId: string; uid: number; seq: number;
   role: string; kind: string; model?: string | null; text?: string;
+}
+interface VideoTaskInput {
+  id: string; uid: number; convId: string; clientRequestId: string; model: string;
+  resolution: string; ratio: string; duration: number; reservedUsd: number; pricePerMTokens: number;
+}
+interface VideoTaskRow {
+  id: string; uid: number; convId: string; clientRequestId: string; providerTaskId: string | null;
+  model: string; status: string; resolution: string; ratio: string; duration: number;
+  reservedUsd: number; pricePerMTokens: number; billingStatus: string;
+  videoBlobHash: string | null; completionTokens: number | null; actualUsd: number | null;
+  error: string | null; createdAt: number; updatedAt: number;
 }
 
 // 会话（conversations 表，Phase 1 不写 data 列）
@@ -346,6 +387,7 @@ const stmtMsgList: Stmt = db.prepare('SELECT * FROM messages WHERE conv_id = ? A
 const stmtMsgNextSeq: Stmt = db.prepare('SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM messages WHERE conv_id = ? AND uid = ?');
 const stmtMsgDelByConv: Stmt = db.prepare('DELETE FROM messages WHERE conv_id = ? AND uid = ?');
 const stmtMsgHasConv: Stmt = db.prepare('SELECT 1 FROM messages WHERE conv_id = ? AND uid = ? LIMIT 1');
+const stmtMsgById: Stmt = db.prepare('SELECT 1 FROM messages WHERE id = ? AND uid = ? LIMIT 1');
 // blob
 const stmtBlobIns: Stmt = db.prepare('INSERT OR IGNORE INTO blobs (hash, mime, size, created_at) VALUES (?, ?, ?, ?)');
 const stmtBlobGet: Stmt = db.prepare('SELECT hash, mime, size FROM blobs WHERE hash = ?');
@@ -377,6 +419,34 @@ const stmtBlobOrphans: Stmt = db.prepare(`
     AND b.hash NOT IN (SELECT blob_hash FROM blob_owners WHERE created_at >= ?)
 `);
 const stmtBlobDel: Stmt = db.prepare('DELETE FROM blobs WHERE hash = ?');
+// 视频任务
+const stmtVideoIns: Stmt = db.prepare(`
+  INSERT OR IGNORE INTO video_tasks (
+    id, uid, conv_id, client_request_id, model, status, resolution, ratio, duration,
+    reserved_usd, price_per_m_tokens, billing_status, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?, ?, ?, ?, 'pending', ?, ?)
+`);
+const stmtVideoById: Stmt = db.prepare('SELECT * FROM video_tasks WHERE id = ?');
+const stmtVideoByClient: Stmt = db.prepare('SELECT * FROM video_tasks WHERE uid = ? AND client_request_id = ?');
+const stmtVideoActiveConv: Stmt = db.prepare(`
+  SELECT * FROM video_tasks
+  WHERE uid = ? AND conv_id = ? AND status IN ('submitting', 'queued', 'running', 'finalizing')
+  ORDER BY created_at DESC LIMIT 1
+`);
+const stmtVideoRecoverable: Stmt = db.prepare(`
+  SELECT * FROM video_tasks
+  WHERE status IN ('submitting', 'queued', 'running', 'finalizing')
+  ORDER BY created_at
+`);
+const stmtVideoActiveCountUser: Stmt = db.prepare("SELECT COUNT(*) AS n FROM video_tasks WHERE uid = ? AND status IN ('submitting', 'queued', 'running', 'finalizing')");
+const stmtVideoActiveCountTotal: Stmt = db.prepare("SELECT COUNT(*) AS n FROM video_tasks WHERE status IN ('submitting', 'queued', 'running', 'finalizing')");
+const stmtVideoProvider: Stmt = db.prepare('UPDATE video_tasks SET provider_task_id = ?, status = ?, updated_at = ? WHERE id = ?');
+const stmtVideoStatus: Stmt = db.prepare('UPDATE video_tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?');
+const stmtVideoComplete: Stmt = db.prepare(`
+  UPDATE video_tasks SET status = 'succeeded', video_blob_hash = ?, completion_tokens = ?, actual_usd = ?,
+    billing_status = ?, error = NULL, updated_at = ? WHERE id = ?
+`);
+const stmtVideoBilling: Stmt = db.prepare('UPDATE video_tasks SET billing_status = ?, actual_usd = ?, updated_at = ? WHERE id = ?');
 
 function listConvs(uid: number): ConvMetaRow[] {
   return stmtConvList2.all(uid).map((r: any) => ({ id: r.id, title: r.title, createdAt: r.created_at, updatedAt: r.updated_at }));
@@ -509,6 +579,56 @@ function deleteBlob(hash: string): void {
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
+function messageExists(id: string, uid: number): boolean { return !!stmtMsgById.get(id, uid); }
+
+function videoTaskFromRow(r: any): VideoTaskRow | null {
+  if (!r) return null;
+  return {
+    id: r.id, uid: r.uid, convId: r.conv_id, clientRequestId: r.client_request_id,
+    providerTaskId: r.provider_task_id, model: r.model, status: r.status,
+    resolution: r.resolution, ratio: r.ratio, duration: r.duration,
+    reservedUsd: Number(r.reserved_usd), pricePerMTokens: Number(r.price_per_m_tokens),
+    billingStatus: r.billing_status, videoBlobHash: r.video_blob_hash,
+    completionTokens: r.completion_tokens === null ? null : Number(r.completion_tokens),
+    actualUsd: r.actual_usd === null ? null : Number(r.actual_usd), error: r.error,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+
+function createVideoTask(v: VideoTaskInput): VideoTaskRow {
+  const now = Date.now();
+  stmtVideoIns.run(
+    v.id, v.uid, v.convId, v.clientRequestId, v.model, v.resolution, v.ratio, v.duration,
+    v.reservedUsd, v.pricePerMTokens, now, now
+  );
+  return videoTaskFromRow(stmtVideoById.get(v.id) || stmtVideoByClient.get(v.uid, v.clientRequestId)) as VideoTaskRow;
+}
+function getVideoTask(id: string): VideoTaskRow | null { return videoTaskFromRow(stmtVideoById.get(id)); }
+function getVideoTaskByClient(uid: number, clientRequestId: string): VideoTaskRow | null {
+  return videoTaskFromRow(stmtVideoByClient.get(uid, clientRequestId));
+}
+function getActiveVideoTask(uid: number, convId: string): VideoTaskRow | null {
+  return videoTaskFromRow(stmtVideoActiveConv.get(uid, convId));
+}
+function listRecoverableVideoTasks(): VideoTaskRow[] {
+  return stmtVideoRecoverable.all().map(videoTaskFromRow).filter(Boolean) as VideoTaskRow[];
+}
+function countActiveVideoTasks(uid?: number): number {
+  const r = uid === undefined ? stmtVideoActiveCountTotal.get() : stmtVideoActiveCountUser.get(uid);
+  return Number((r as any)?.n || 0);
+}
+function setVideoTaskProvider(id: string, providerTaskId: string, status: string): void {
+  stmtVideoProvider.run(providerTaskId, status, Date.now(), id);
+}
+function setVideoTaskStatus(id: string, status: string, error: string | null = null): void {
+  stmtVideoStatus.run(status, error, Date.now(), id);
+}
+function completeVideoTask(id: string, blobHash: string, completionTokens: number, actualUsd: number, billingStatus: string): void {
+  stmtVideoComplete.run(blobHash, completionTokens, actualUsd, billingStatus, Date.now(), id);
+}
+function setVideoTaskBilling(id: string, billingStatus: string, actualUsd: number | null): void {
+  stmtVideoBilling.run(billingStatus, actualUsd, Date.now(), id);
+}
 
 // 迁移用：列出所有会话（含 data 列），供 migrate-phase1.ts 把老 JSON-blob 拆进新表。
 const stmtConvAll: Stmt = db.prepare('SELECT uid, id, data FROM conversations');
@@ -525,6 +645,9 @@ module.exports = {
   SESSION_TTL_MS, checkpoint,
   // Phase 1：会话/消息/blob 数据访问层
   listConvs, getConvMeta, createConv, renameConv, touchConv, deleteConv, convHasMessages,
-  nextSeq, insertMessage, getMessages,
+  nextSeq, insertMessage, messageExists, getMessages,
   insertBlob, getBlobMeta, claimBlob, linkBlob, userOwnsBlob, orphanBlobs, deleteBlob, listConvsForMigration,
+  createVideoTask, getVideoTask, getVideoTaskByClient, getActiveVideoTask, listRecoverableVideoTasks,
+  countActiveVideoTasks,
+  setVideoTaskProvider, setVideoTaskStatus, completeVideoTask, setVideoTaskBilling,
 };

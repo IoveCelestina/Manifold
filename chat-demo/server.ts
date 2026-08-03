@@ -6,6 +6,7 @@
 //   /api/keys[/select]  账户 key 列表 / 选定（key 明文不出服务端）
 //   /api/models         透传上游 /v1/models（服务端用 session.api_key 调）
 //   /api/conversations/:id/messages  聊天 SSE（服务端注入系统提示 + 用 session.api_key 调上游）
+//   /api/conversations/:id/videos    方舟视频后台任务（持久化、可重连、成片落私有 blob）
 //   /store/*            会话存储（按 session.uid 隔离，沿用整条 JSON blob 模型）
 //   /api/v1/* /v1/*     旧的同源代理（迁移期保留，0d 下线）
 //
@@ -31,6 +32,11 @@ const ARK_BASE: string = (process.env.ARK_BASE || 'https://ark.cn-beijing.volces
 const ARK_API_KEY: string = process.env.ARK_API_KEY || '';
 const SUB2API_ADMIN_KEY: string = process.env.SUB2API_ADMIN_KEY || '';
 const DOUBAO_PRICE_USD: number = Number(process.env.DOUBAO_PRICE_USD || 0.10);   // 每张扣多少 USD（先一口价）
+// 豆包视频 2.0：使用现有方舟 Key，任务完成后按返回的 completion_tokens 与 sub2api 余额结算。
+const SEEDANCE_MODEL: string = process.env.SEEDANCE_MODEL || 'doubao-seedance-2-0-260128';
+const SEEDANCE_PRICE_USD_PER_M_TOKENS = Number(process.env.SEEDANCE_PRICE_USD_PER_M_TOKENS || 46);
+// 官方资源包给出的量级约为 700 万 Tokens / 28 个 480P 视频；以 5 秒为基准做保守预授权。
+const SEEDANCE_BASE_TOKENS_480P_5S = Number(process.env.SEEDANCE_BASE_TOKENS_480P_5S || 250_000);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // 静态资源版本号 = app.js/style.css 内容哈希。部署后内容变 → index.html 引用的 ?v= 变 →
@@ -71,6 +77,11 @@ const BLOB_MAX_BYTES_PER_USER = positiveIntEnv('BLOB_MAX_BYTES_PER_USER', 500 * 
 const BLOB_MAX_BYTES_TOTAL = positiveIntEnv('BLOB_MAX_BYTES_TOTAL', 20 * 1024 * 1024 * 1024);
 const BLOB_MAX_CONCURRENT_PER_USER = positiveIntEnv('BLOB_MAX_CONCURRENT_PER_USER', 2);
 const BLOB_MAX_CONCURRENT_TOTAL = positiveIntEnv('BLOB_MAX_CONCURRENT_TOTAL', 16);
+const VIDEO_MAX_BYTES = positiveIntEnv('VIDEO_MAX_BYTES', 200 * 1024 * 1024);
+const VIDEO_POLL_INTERVAL_MS = positiveIntEnv('VIDEO_POLL_INTERVAL_MS', 5000);
+const VIDEO_TASK_TIMEOUT_MS = positiveIntEnv('VIDEO_TASK_TIMEOUT_MS', 45 * 60 * 1000);
+const VIDEO_MAX_CONCURRENT_PER_USER = positiveIntEnv('VIDEO_MAX_CONCURRENT_PER_USER', 1);
+const VIDEO_MAX_CONCURRENT_TOTAL = positiveIntEnv('VIDEO_MAX_CONCURRENT_TOTAL', 4);
 const REQUEST_TIMEOUT_MS = positiveIntEnv('REQUEST_TIMEOUT_MS', 2 * 60 * 1000);
 const MAX_MESSAGE_TEXT_BYTES = positiveIntEnv('MAX_MESSAGE_TEXT_BYTES', 200 * 1024);
 const MAX_CONV_TITLE_LENGTH = positiveIntEnv('MAX_CONV_TITLE_LENGTH', 200);
@@ -91,6 +102,11 @@ function sniffSafeImageMime(buf: Buffer): string | null {
   if (buf.length >= 6 && (buf.subarray(0, 6).toString('ascii') === 'GIF87a' || buf.subarray(0, 6).toString('ascii') === 'GIF89a')) return 'image/gif';
   if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   return null;
+}
+
+function sniffSafeVideoMime(buf: Buffer): string | null {
+  // ISO Base Media File Format：首个 box 的 type 位于 4..8；Seedance 当前输出 MP4。
+  return buf.length >= 12 && buf.subarray(4, 8).toString('ascii') === 'ftyp' ? 'video/mp4' : null;
 }
 
 // 服务端生成图片也走同一套用户/全局配额，避免绕过上传端点直接撑满 blob 卷。
@@ -239,7 +255,7 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-// CSP：DOMPurify 之上的兜底——脚本/连接/样式全锁同源。data:/blob: 仅放给 img。
+// CSP：DOMPurify 之上的兜底——脚本/连接/样式全锁同源；图片和媒体各自只放必要来源。
 const CSP = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -247,6 +263,7 @@ const CSP = [
   "frame-ancestors 'none'",
   "form-action 'self'",
   "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
   "font-src 'self'",
   "style-src 'self'",
   "script-src 'self'",
@@ -808,7 +825,10 @@ function apiConvGet(res: ServerResponse, session: any, convId: string): void {
   if (!meta) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
   // 在途生成标记：前端据此决定是否开 /stream 重连，接上还没跑完的回复。
   const task = inflight.get(taskKey(session.uid, convId));
-  const inflightInfo = task && !task.done ? { kind: task.kind } : null;
+  const durableVideo = !task || task.done ? db.getActiveVideoTask(session.uid, convId) : null;
+  const inflightInfo = task && !task.done
+    ? { kind: task.kind }
+    : durableVideo ? { kind: 'video', status: durableVideo.status } : null;
   sendJson(res, 200, { ...meta, messages: db.getMessages(convId, session.uid), inflight: inflightInfo });
 }
 
@@ -816,7 +836,12 @@ function apiConvGet(res: ServerResponse, session: any, convId: string): void {
 function apiConvStream(res: ServerResponse, session: any, convId: string): void {
   if (session.uid === null) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
   if (!db.getConvMeta(session.uid, convId)) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
-  const task = inflight.get(taskKey(session.uid, convId));
+  const key = taskKey(session.uid, convId);
+  let task = inflight.get(key);
+  if (!task || task.done) {
+    const durable = db.getActiveVideoTask(session.uid, convId);
+    if (durable) task = ensureVideoTaskRunning(durable);
+  }
   if (!task || task.done) { res.writeHead(204); res.end(); return; }
   taskAttach(task, res);
 }
@@ -825,7 +850,12 @@ function apiConvStream(res: ServerResponse, session: any, convId: string): void 
 // 幂等：无在途任务也回 200。
 function apiConvCancel(res: ServerResponse, session: any, convId: string): void {
   if (session.uid === null) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
-  const task = inflight.get(taskKey(session.uid, convId));
+  const key = taskKey(session.uid, convId);
+  let task = inflight.get(key);
+  if (!task || task.done) {
+    const durable = db.getActiveVideoTask(session.uid, convId);
+    if (durable) task = ensureVideoTaskRunning(durable);
+  }
   if (task && !task.done && task.cancel) task.cancel();
   sendJson(res, 200, { ok: true });
 }
@@ -837,7 +867,12 @@ async function apiConvPatch(req: IncomingMessage, res: ServerResponse, session: 
   sendJson(res, 200, { ok: true });
 }
 function apiConvDelete(res: ServerResponse, session: any, convId: string): void {
-  if (session.uid !== null) db.deleteConv(session.uid, convId);
+  if (session.uid !== null) {
+    if (isGenerating(taskKey(session.uid, convId)) || db.getActiveVideoTask(session.uid, convId)) {
+      sendJson(res, 409, { error: { message: '该对话仍有内容在生成，完成或取消后才能删除' } }); return;
+    }
+    db.deleteConv(session.uid, convId);
+  }
   sendJson(res, 200, { ok: true });
 }
 
@@ -845,12 +880,13 @@ function apiConvDelete(res: ServerResponse, session: any, convId: string): void 
 // 把「生成」做成脱离单条连接的后台任务：任务自己拉上游、累积、落库；客户端只是订阅者。
 // 刷新/断开只是少一个订阅者，生成照常跑完 → 解决「进行中刷新就丢」。每会话至多一条在途。
 type GenTask = {
-  key: string; convId: string; uid: number; kind: 'chat' | 'image';
+  key: string; convId: string; uid: number; kind: 'chat' | 'image' | 'video';
   raw: Buffer[]; rawBytes: number;          // 累计「发给客户端的原始 SSE 字节」，供重连回放
   subs: Set<ServerResponse>;                // 当前在看的连接（可 0 个：纯后台跑）
   done: boolean; error: string | null; startedAt: number;
   cancel?: () => void;                      // 外部取消通道：abort 上游请求（用户点「停止」时调）
   canceled?: boolean;                       // 标记「用户主动取消」，与上游错误区分，避免误报
+  videoTaskId?: string;                     // 视频任务持久化主键（重启恢复 / 方舟取消用）
 };
 const inflight = new Map<string, GenTask>();
 const TASK_RAW_MAX = 8 * 1024 * 1024;       // raw 回放缓冲上限（生图 partial 较大，超限丢早段留末段）
@@ -1538,6 +1574,437 @@ async function apiImages(req: IncomingMessage, res: ServerResponse, session: any
   }
 }
 
+// ── 豆包视频 2.0（持久化异步任务 + 私有成片）──────────────────────────────
+const VIDEO_RESOLUTIONS = new Set(['480p', '720p', '1080p']);
+const VIDEO_RATIOS = new Set(['16:9', '9:16', '1:1', '4:3', '3:4', '21:9']);
+const VIDEO_TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'create_unknown']);
+const VIDEO_CLIENT_REQUEST_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
+function roundMoney(n: number): number { return Math.round(n * 1_000_000) / 1_000_000; }
+function videoReserveUsd(resolution: string, duration: number): number {
+  const pixelFactor: Record<string, number> = { '480p': 1, '720p': 2.25, '1080p': 5.0625 };
+  const tokens = SEEDANCE_BASE_TOKENS_480P_5S * (duration / 5) * (pixelFactor[resolution] || 1);
+  return roundMoney(tokens * SEEDANCE_PRICE_USD_PER_M_TOKENS / 1_000_000);
+}
+function videoEvent(task: GenTask, status: string, message = '', extra: any = {}): void {
+  taskWrite(task, Buffer.from(sseData({ type: 'video.status', status, message, ...extra })));
+}
+function newVideoTaskRunner(row: any): GenTask {
+  return {
+    key: taskKey(row.uid, row.convId), convId: row.convId, uid: row.uid, kind: 'video',
+    raw: [], rawBytes: 0, subs: new Set(), done: false, error: null, startedAt: Date.now(),
+    videoTaskId: row.id,
+  };
+}
+function sleepMs(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function arkHeaders(): Record<string, string> {
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ARK_API_KEY}` };
+}
+
+async function refundVideoReserve(row: any, reason: string): Promise<string> {
+  const latest = db.getVideoTask(row.id) || row;
+  if (latest.billingStatus !== 'reserved' && latest.billingStatus !== 'refund_pending') return latest.billingStatus;
+  try {
+    await adjustUserBalance(
+      latest.uid, latest.reservedUsd, 'add', `dbvid_${latest.id}_refund`,
+      `豆包视频退款 ${latest.model} · ${reason}`
+    );
+    db.setVideoTaskBilling(latest.id, 'refunded', 0);
+    return 'refunded';
+  } catch (e: any) {
+    db.setVideoTaskBilling(latest.id, 'refund_pending', null);
+    console.error(`[seedance] 退款待重试 task=${latest.id}: ${e.message}`);
+    return 'refund_pending';
+  }
+}
+
+async function settleVideoCharge(row: any, completionTokens: number): Promise<{ actualUsd: number; billingStatus: string }> {
+  // 极少数异常响应可能缺 usage。此时宁可保留预授权并标记待核，不可把已产生的方舟成本全退掉。
+  if (!Number.isFinite(completionTokens) || completionTokens <= 0) {
+    return { actualUsd: row.reservedUsd, billingStatus: 'usage_missing' };
+  }
+  const actualUsd = roundMoney(Math.max(0, completionTokens) * row.pricePerMTokens / 1_000_000);
+  const delta = roundMoney(row.reservedUsd - actualUsd);
+  let billingStatus = 'settled';
+  try {
+    if (delta > 0.000001) {
+      await adjustUserBalance(row.uid, delta, 'add', `dbvid_${row.id}_settle_add`, `豆包视频结算退款 ${row.model}`);
+    } else if (delta < -0.000001) {
+      await adjustUserBalance(row.uid, -delta, 'subtract', `dbvid_${row.id}_settle_sub`, `豆包视频结算补扣 ${row.model}`);
+    }
+  } catch (e: any) {
+    billingStatus = delta >= 0 ? 'refund_pending' : 'settlement_due';
+    console.error(`[seedance] 结算待处理 task=${row.id} status=${billingStatus}: ${e.message}`);
+  }
+  return { actualUsd, billingStatus };
+}
+
+// 方舟返回的成片 URL 有时效，必须马上流式拉回私有 blob；全过程不把大视频聚合进内存。
+async function persistRemoteVideoForUser(uid: number, sourceUrl: string): Promise<string> {
+  let parsed: URL;
+  try { parsed = new URL(sourceUrl); } catch { throw new Error('方舟返回了非法视频地址'); }
+  const localHttp = parsed.protocol === 'http:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1');
+  if (parsed.protocol !== 'https:' && !localHttp) throw new Error('方舟返回了不安全的视频地址');
+
+  const upstream = await fetch(parsed, { headers: { 'Accept': 'video/mp4' }, redirect: 'follow', signal: AbortSignal.timeout(2 * 60 * 1000) });
+  if (!upstream.ok || !upstream.body) throw new Error(`下载成片失败（HTTP ${upstream.status}）`);
+  const declared = Number(upstream.headers.get('content-length') || 0);
+  if (declared > VIDEO_MAX_BYTES) throw new Error(`成片超过 ${Math.ceil(VIDEO_MAX_BYTES / 1024 / 1024)}MB 存储上限`);
+
+  const tempPath = path.join(BLOB_DIR, `.video-${crypto.randomBytes(16).toString('hex')}.tmp`);
+  const digest = crypto.createHash('sha256');
+  let size = 0;
+  let head = Buffer.alloc(0);
+  try {
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void) {
+        const b = Buffer.from(chunk);
+        if (size + b.length > VIDEO_MAX_BYTES) { callback(new Error(`成片超过 ${Math.ceil(VIDEO_MAX_BYTES / 1024 / 1024)}MB 存储上限`)); return; }
+        size += b.length; digest.update(b);
+        if (head.length < 32) head = Buffer.concat([head, b]).subarray(0, 32);
+        callback(null, b);
+      },
+    });
+    await pipeline(Readable.fromWeb(upstream.body), meter, fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+    if (!size || !sniffSafeVideoMime(head)) throw new Error('方舟成片不是有效的 MP4 文件');
+
+    const hash = digest.digest('hex');
+    const finalPath = blobPath(hash);
+    const hadMeta = !!db.getBlobMeta(hash);
+    let createdFile = false;
+    if (!fs.existsSync(finalPath)) {
+      try { fs.linkSync(tempPath, finalPath); createdFile = true; }
+      catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
+    }
+    const claim = db.claimBlob(
+      uid, hash, 'video/mp4', size,
+      BLOB_MAX_COUNT_PER_USER, BLOB_MAX_BYTES_PER_USER, BLOB_MAX_BYTES_TOTAL
+    );
+    if (!claim.ok) {
+      if (createdFile && !hadMeta && !db.getBlobMeta(hash)) fs.rmSync(finalPath, { force: true });
+      const msg = claim.code === 'quota_total' ? '服务器视频存储空间已满' : '账号视频存储配额不足';
+      throw new Error(msg);
+    }
+    return hash;
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+}
+
+async function finishVideoFailure(task: GenTask, row: any, status: 'failed' | 'cancelled', message: string, refund: boolean): Promise<void> {
+  if (task.done) return;
+  db.setVideoTaskStatus(row.id, status, message || null);
+  if (refund) await refundVideoReserve(row, status === 'cancelled' ? '用户取消' : '生成失败');
+  videoEvent(task, status, message);
+  if (status === 'failed') task.error = message;
+  taskFinish(task);
+}
+
+function bindVideoCancel(task: GenTask): void {
+  let canceling = false;
+  task.cancel = () => {
+    if (canceling || task.done) return;
+    canceling = true; task.canceled = true;
+    void (async () => {
+      const row = db.getVideoTask(task.videoTaskId || '');
+      if (!row || VIDEO_TERMINAL.has(row.status)) return;
+      if (!row.providerTaskId) {
+        videoEvent(task, 'submitting', '创建请求正在提交，暂时无法安全取消');
+        task.canceled = false;
+        return;
+      }
+      try {
+        const r = await fetch(`${ARK_BASE}/contents/generations/tasks/${encodeURIComponent(row.providerTaskId)}`, {
+          method: 'DELETE', headers: arkHeaders(), signal: AbortSignal.timeout(30_000),
+        });
+        if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
+        await finishVideoFailure(task, row, 'cancelled', '', true);
+      } catch (e: any) {
+        task.canceled = false;
+        videoEvent(task, row.status, `取消失败，任务仍在后台运行：${e.message}`);
+      } finally { canceling = false; }
+    })();
+  };
+}
+
+async function runVideoTask(task: GenTask): Promise<void> {
+  bindVideoCancel(task);
+  let consecutiveErrors = 0;
+  while (!task.done) {
+    const row = db.getVideoTask(task.videoTaskId || '');
+    if (!row) { task.error = '视频任务记录缺失'; taskFinish(task); return; }
+    if (!row.providerTaskId) {
+      const held = row.billingStatus === 'reserved';
+      if (row.billingStatus === 'pending') {
+        // 进程可能恰好死在管理接口成功与本地状态更新之间。用同一个幂等键确认预授权，随后原额退回。
+        try {
+          await adjustUserBalance(row.uid, row.reservedUsd, 'subtract', `dbvid_${row.id}_reserve`, `豆包视频预授权恢复 ${row.model}`);
+          db.setVideoTaskBilling(row.id, 'reserved', null);
+          await refundVideoReserve({ ...row, billingStatus: 'reserved' }, '任务未完成提交');
+        } catch (e: any) {
+          db.setVideoTaskBilling(row.id, 'review_required', null);
+          console.error(`[seedance] 未提交任务账务待核 task=${row.id}: ${e.message}`);
+        }
+      }
+      db.setVideoTaskStatus(row.id, held ? 'create_unknown' : 'failed', '服务重启时未找到方舟任务 ID');
+      if (held) db.setVideoTaskBilling(row.id, 'review_required', null);
+      task.error = held ? '方舟创建结果未知，已保留预授权并等待人工核对' : '视频任务尚未提交成功';
+      taskFinish(task); return;
+    }
+    if (Date.now() - row.createdAt > VIDEO_TASK_TIMEOUT_MS) {
+      task.cancel?.();
+      await sleepMs(1000);
+      continue;
+    }
+
+    try {
+      const r = await fetch(`${ARK_BASE}/contents/generations/tasks/${encodeURIComponent(row.providerTaskId)}`, {
+        headers: arkHeaders(), signal: AbortSignal.timeout(30_000),
+      });
+      if (!r.ok) throw new Error(`查询方舟任务 HTTP ${r.status}`);
+      const j: any = await r.json();
+      if (task.done) return;
+      consecutiveErrors = 0;
+      const status = String(j.status || '').toLowerCase();
+      if (status === 'queued' || status === 'running') {
+        db.setVideoTaskStatus(row.id, status, null);
+        videoEvent(task, status, status === 'queued' ? '排队中' : '正在生成', { progress: j.progress ?? null });
+      } else if (status === 'succeeded') {
+        db.setVideoTaskStatus(row.id, 'finalizing', null);
+        videoEvent(task, 'finalizing', '成片已生成，正在安全保存');
+        const videoUrl = j?.content?.video_url || (Array.isArray(j?.content) ? j.content[0]?.video_url : '');
+        const completionTokens = Math.max(0, Math.floor(Number(j?.usage?.completion_tokens || 0)));
+        if (!videoUrl) {
+          const settled = await settleVideoCharge(row, completionTokens);
+          db.setVideoTaskBilling(row.id, settled.billingStatus, settled.actualUsd);
+          await finishVideoFailure(task, row, 'failed', '方舟任务成功但未返回成片地址', false);
+          return;
+        }
+        let hash = '';
+        let lastError: any = null;
+        for (let attempt = 0; attempt < 3 && !hash; attempt++) {
+          try { hash = await persistRemoteVideoForUser(row.uid, videoUrl); }
+          catch (e: any) { lastError = e; if (attempt < 2) await sleepMs(1500 * (attempt + 1)); }
+        }
+        const settled = await settleVideoCharge(row, completionTokens);
+        if (!hash) {
+          db.setVideoTaskBilling(row.id, settled.billingStatus, settled.actualUsd);
+          await finishVideoFailure(task, row, 'failed', `成片保存失败：${lastError?.message || '未知错误'}`, false);
+          return;
+        }
+        const messageId = `m_${row.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 28)}_video`;
+        if (!db.messageExists(messageId, row.uid)) {
+          db.insertMessage({
+            id: messageId, convId: row.convId, uid: row.uid, seq: db.nextSeq(row.convId, row.uid),
+            role: 'assistant', kind: 'video', model: row.model,
+            text: `${row.resolution} · ${row.duration}s · ${row.ratio}`,
+          });
+        }
+        db.linkBlob(messageId, hash, 0, `seedance-${row.duration}s-${row.resolution}.mp4`);
+        db.touchConv(row.uid, row.convId);
+        db.completeVideoTask(row.id, hash, completionTokens, settled.actualUsd, settled.billingStatus);
+        videoEvent(task, 'succeeded', '成片已保存', { completion_tokens: completionTokens });
+        taskFinish(task); return;
+      } else if (status === 'failed') {
+        const message = String(j?.error?.message || '方舟视频生成失败').slice(0, 1000);
+        await finishVideoFailure(task, row, 'failed', message, true); return;
+      } else if (status === 'cancelled' || status === 'canceled') {
+        await finishVideoFailure(task, row, 'cancelled', '', true); return;
+      } else {
+        videoEvent(task, row.status, '等待方舟更新任务状态');
+      }
+    } catch (e: any) {
+      consecutiveErrors++;
+      if (consecutiveErrors === 1 || consecutiveErrors % 6 === 0) {
+        videoEvent(task, row.status, `网络波动，正在重试（${e.message}）`);
+      }
+    }
+    await sleepMs(VIDEO_POLL_INTERVAL_MS);
+  }
+}
+
+function ensureVideoTaskRunning(row: any): GenTask {
+  const key = taskKey(row.uid, row.convId);
+  const existing = inflight.get(key);
+  if (existing && !existing.done) return existing;
+  const task = newVideoTaskRunner(row);
+  inflight.set(key, task);
+  videoEvent(task, row.status, row.status === 'submitting' ? '正在恢复任务' : '已恢复后台生成');
+  void runVideoTask(task).catch((e: any) => {
+    task.error = `视频任务异常：${e.message}`;
+    taskFinish(task);
+  });
+  return task;
+}
+
+function sendVideoTerminalSse(res: ServerResponse, row: any): void {
+  sseHead(res);
+  safeWrite(res, sseData({ type: 'video.status', status: row.status, message: row.error || '' }));
+  safeWrite(res, 'data: [DONE]\n\n');
+  res.end();
+}
+
+async function apiVideos(req: IncomingMessage, res: ServerResponse, session: any, convId: string): Promise<void> {
+  if (session.uid === null) { sendJson(res, 403, { error: { message: '视频生成需登录账号后使用' } }); return; }
+  if (!ARK_API_KEY || !SUB2API_ADMIN_KEY) { sendJson(res, 500, { error: { message: '视频生成未配置（缺 ARK_API_KEY / SUB2API_ADMIN_KEY）' } }); return; }
+  let body: any;
+  try { body = await readJsonBody(req, IMAGE_MAX_BODY); } catch (e: any) { sendBodyError(res, e); return; }
+  const uid = session.uid;
+  const prompt = String(body.prompt || '').trim();
+  const model = String(body.model || '');
+  const clientRequestId = String(body.client_request_id || '');
+  const resolution = String(body.resolution || '720p').toLowerCase();
+  const ratio = String(body.ratio || '16:9');
+  const duration = Math.floor(Number(body.duration || 5));
+  if (!prompt || bodyTextTooLarge(prompt)) { sendJson(res, 400, { error: { message: '请填写有效的视频描述' } }); return; }
+  if (model !== SEEDANCE_MODEL) { sendJson(res, 400, { error: { message: '当前仅支持豆包 Seedance 2.0' } }); return; }
+  if (!VIDEO_CLIENT_REQUEST_RE.test(clientRequestId)) { sendJson(res, 400, { error: { message: 'client_request_id 格式非法' } }); return; }
+  if (!VIDEO_RESOLUTIONS.has(resolution) || !VIDEO_RATIOS.has(ratio) || duration < 4 || duration > 15) {
+    sendJson(res, 400, { error: { message: '视频规格非法（支持 480p/720p/1080p、4–15 秒）' } }); return;
+  }
+
+  const prior = db.getVideoTaskByClient(uid, clientRequestId);
+  if (prior) {
+    if (prior.convId !== convId) { sendJson(res, 409, { error: { message: '请求 ID 已用于其他对话' } }); return; }
+    if (VIDEO_TERMINAL.has(prior.status)) sendVideoTerminalSse(res, prior);
+    else taskAttach(ensureVideoTaskRunning(prior), res);
+    return;
+  }
+  const key = taskKey(uid, convId);
+  if (isGenerating(key) || db.getActiveVideoTask(uid, convId)) {
+    sendJson(res, 409, { error: { message: '该对话已有内容在生成，请稍候' } }); return;
+  }
+  if (db.countActiveVideoTasks(uid) >= VIDEO_MAX_CONCURRENT_PER_USER || db.countActiveVideoTasks() >= VIDEO_MAX_CONCURRENT_TOTAL) {
+    sendJson(res, 429, { error: { message: '视频生成队列已满，请稍后再试' } }); return;
+  }
+
+  const rawRefs: any[] = Array.isArray(body.refs) ? body.refs : [];
+  if (rawRefs.length > MAX_ATTACHMENTS || rawRefs.some((h) => typeof h !== 'string' || !HASH_RE.test(h))) {
+    sendJson(res, 400, { error: { message: `参考图最多 ${MAX_ATTACHMENTS} 张，且必须是已上传图片` } }); return;
+  }
+  const refDataUrls: string[] = [];
+  for (const hash of rawRefs) {
+    if (!db.userOwnsBlob(uid, hash)) { sendJson(res, 404, { error: { message: '参考图不存在' } }); return; }
+    try {
+      const buf = fs.readFileSync(blobPath(hash));
+      const mime = sniffSafeImageMime(buf.subarray(0, 32));
+      if (!mime) { sendJson(res, 400, { error: { message: '视频参考素材目前仅支持 PNG/JPEG/GIF/WebP 图片' } }); return; }
+      refDataUrls.push(`data:${mime};base64,${buf.toString('base64')}`);
+    } catch { sendJson(res, 404, { error: { message: '参考图文件缺失' } }); return; }
+  }
+
+  const reservedUsd = videoReserveUsd(resolution, duration);
+  // 在第一次 await 前同步落一条 active 记录：并发请求随后会被上面的 DB 计数挡住，
+  // 避免两次余额查询同时让同一用户越过「最多一个视频任务」的闸门。
+  const taskId = 'v_' + crypto.randomBytes(12).toString('hex');
+  const row = db.createVideoTask({
+    id: taskId, uid, convId, clientRequestId, model, resolution, ratio, duration,
+    reservedUsd, pricePerMTokens: SEEDANCE_PRICE_USD_PER_M_TOKENS,
+  });
+  if (row.id !== taskId) {
+    if (VIDEO_TERMINAL.has(row.status)) sendVideoTerminalSse(res, row);
+    else taskAttach(ensureVideoTaskRunning(row), res);
+    return;
+  }
+  const task = newVideoTaskRunner(row);
+  inflight.set(key, task);
+  videoEvent(task, 'submitting', '正在校验余额与任务额度');
+  task.cancel = () => { task.canceled = true; };
+  try {
+    const bal = await doubaoUserBalance(uid);
+    if (task.canceled) {
+      db.setVideoTaskStatus(taskId, 'cancelled', null);
+      db.setVideoTaskBilling(taskId, 'not_charged', null);
+      taskFinish(task);
+      if (!res.destroyed && !res.writableEnded) sendJson(res, 409, { error: { message: '视频任务已取消' } });
+      return;
+    }
+    if (Number.isFinite(bal) && bal < reservedUsd) {
+      db.setVideoTaskStatus(taskId, 'failed', '余额不足');
+      db.setVideoTaskBilling(taskId, 'not_charged', null);
+      task.error = '余额不足'; taskFinish(task);
+      sendJson(res, 402, { error: { message: `余额不足（本次预授权 $${reservedUsd.toFixed(2)}，当前余额 $${bal.toFixed(2)}），任务完成后会按实际 Tokens 结算` } });
+      return;
+    }
+  } catch { /* 查询失败不越权放行，实际扣费接口仍是最终闸门 */ }
+  if (task.canceled) {
+    db.setVideoTaskStatus(taskId, 'cancelled', null);
+    db.setVideoTaskBilling(taskId, 'not_charged', null);
+    taskFinish(task);
+    if (!res.destroyed && !res.writableEnded) sendJson(res, 409, { error: { message: '视频任务已取消' } });
+    return;
+  }
+  try {
+    await adjustUserBalance(uid, reservedUsd, 'subtract', `dbvid_${taskId}_reserve`, `豆包视频预授权 ${resolution} ${duration}s ${ratio}`);
+    db.setVideoTaskBilling(taskId, 'reserved', null);
+  } catch (e: any) {
+    db.setVideoTaskStatus(taskId, 'failed', '预授权失败');
+    db.setVideoTaskBilling(taskId, 'charge_failed', null);
+    const insufficient = /negative|不足|insufficient|internal error/i.test(String(e?.message || ''));
+    task.error = insufficient ? '余额不足' : `视频预授权失败：${e.message}`; taskFinish(task);
+    sendJson(res, insufficient ? 402 : 502, { error: { message: task.error } });
+    return;
+  }
+  if (task.canceled) {
+    await finishVideoFailure(task, row, 'cancelled', '', true);
+    if (!res.destroyed && !res.writableEnded) sendJson(res, 409, { error: { message: '视频任务已取消' } });
+    return;
+  }
+
+  if (!db.getConvMeta(uid, convId)) db.createConv(uid, convId, prompt.slice(0, 24));
+  const userMessageId = `m_${taskId.replace(/[^A-Za-z0-9]/g, '').slice(0, 28)}_user`;
+  if (!db.messageExists(userMessageId, uid)) {
+    const seq = db.nextSeq(convId, uid);
+    db.insertMessage({ id: userMessageId, convId, uid, seq, role: 'user', kind: 'chat', text: prompt });
+    rawRefs.forEach((h, i) => db.linkBlob(userMessageId, h, i));
+    if (seq === 0) db.renameConv(uid, convId, prompt.slice(0, 24));
+    db.touchConv(uid, convId);
+  }
+
+  taskAttach(task, res);
+  videoEvent(task, 'submitting', '正在提交方舟视频任务');
+  const createCtrl = new AbortController();
+  const createTimeout = setTimeout(() => createCtrl.abort(new Error('方舟创建任务超时')), 90_000);
+  task.cancel = () => { task.canceled = true; createCtrl.abort(new Error('用户取消')); };
+  const textPrompt = `${prompt} --ratio ${ratio} --resolution ${resolution} --duration ${duration} --watermark false`;
+  const content: any[] = [{ type: 'text', text: textPrompt }];
+  refDataUrls.forEach((url) => content.push({ type: 'image_url', image_url: { url }, role: 'reference_image' }));
+  let created: Response;
+  try {
+    created = await fetch(`${ARK_BASE}/contents/generations/tasks`, {
+      method: 'POST', headers: arkHeaders(), body: JSON.stringify({ model, content }), signal: createCtrl.signal,
+    });
+  } catch (e: any) {
+    clearTimeout(createTimeout);
+    db.setVideoTaskStatus(taskId, 'create_unknown', String(e.message || '创建结果未知').slice(0, 1000));
+    db.setVideoTaskBilling(taskId, 'review_required', null);
+    task.error = '方舟创建结果未知；为避免重复付费不会自动重试，预授权已保留待核对';
+    taskFinish(task); return;
+  }
+  clearTimeout(createTimeout);
+  if (!created.ok) {
+    const errText = (await created.text().catch(() => '')).slice(0, 1000) || `方舟创建任务 HTTP ${created.status}`;
+    await finishVideoFailure(task, row, 'failed', errText, true); return;
+  }
+  let createdJson: any = null;
+  try { createdJson = await created.json(); } catch { /* handled below */ }
+  const providerTaskId = String(createdJson?.id || '');
+  if (!providerTaskId) {
+    db.setVideoTaskStatus(taskId, 'create_unknown', '方舟响应缺少任务 ID');
+    db.setVideoTaskBilling(taskId, 'review_required', null);
+    task.error = '方舟创建结果未知；响应缺少任务 ID，预授权已保留待核对';
+    taskFinish(task); return;
+  }
+  db.setVideoTaskProvider(taskId, providerTaskId, 'queued');
+  task.cancel = undefined;
+  bindVideoCancel(task);
+  videoEvent(task, 'queued', '已提交，等待方舟调度');
+  void runVideoTask(task).catch((e: any) => {
+    task.error = `视频任务异常：${e.message}`;
+    taskFinish(task);
+  });
+}
+
 const activeBlobUploads = new Map<number, number>();
 let activeBlobUploadsTotal = 0;
 
@@ -1658,8 +2125,9 @@ async function apiBlobUpload(req: IncomingMessage, res: ServerResponse, session:
   }
 }
 
-// 读 blob：grant/消息归属鉴权；只有魔数确认的位图可内联，其他文件强制下载。
-async function apiBlobGet(res: ServerResponse, session: any, hash: string): Promise<void> {
+// 读 blob：grant/消息归属鉴权；只有魔数确认的位图/MP4 可内联。MP4 支持单段 Range，
+// 否则 iOS/Android 的原生播放器无法拖动进度，也常常不会开始播放。
+async function apiBlobGet(req: IncomingMessage, res: ServerResponse, session: any, hash: string): Promise<void> {
   if (session.uid === null || !db.userOwnsBlob(session.uid, hash)) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
   const meta = db.getBlobMeta(hash);
   if (!meta) { sendJson(res, 404, { error: { message: 'not found' } }); return; }
@@ -1676,17 +2144,39 @@ async function apiBlobGet(res: ServerResponse, session: any, hash: string): Prom
     sendJson(res, 404, { error: { message: 'blob 文件缺失' } }); return;
   }
   const imageMime = sniffSafeImageMime(head.subarray(0, bytesRead));
+  const videoMime = sniffSafeVideoMime(head.subarray(0, bytesRead));
+  const inlineMime = imageMime || videoMime;
+  let start = 0, end = Math.max(0, stat.size - 1), partial = false;
+  const range = String(req.headers.range || '');
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+    if (!m || (!m[1] && !m[2])) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, ...SECURITY_HEADERS }); res.end(); return;
+    }
+    if (m[1]) {
+      start = Number(m[1]); end = m[2] ? Number(m[2]) : stat.size - 1;
+    } else {
+      const suffix = Number(m[2]); start = Math.max(0, stat.size - suffix); end = stat.size - 1;
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= stat.size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, ...SECURITY_HEADERS }); res.end(); return;
+    }
+    end = Math.min(end, stat.size - 1); partial = true;
+  }
   const headers: Record<string, string> = {
-    'Content-Type': imageMime || 'application/octet-stream',
-    'Content-Length': String(stat.size),
+    'Content-Type': inlineMime || 'application/octet-stream',
+    'Content-Length': String(end - start + 1),
     'Cache-Control': 'private, no-store, max-age=0',
     'Content-Security-Policy': "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
     'Cross-Origin-Resource-Policy': 'same-origin',
     ...SECURITY_HEADERS,
   };
-  if (!imageMime) headers['Content-Disposition'] = `attachment; filename="${hash}"`;
-  res.writeHead(200, headers);
-  const stream = fs.createReadStream(filePath);
+  if (inlineMime) headers['Accept-Ranges'] = 'bytes';
+  if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+  if (!inlineMime) headers['Content-Disposition'] = `attachment; filename="${hash}"`;
+  res.writeHead(partial ? 206 : 200, headers);
+  if (req.method === 'HEAD') { res.end(); return; }
+  const stream = fs.createReadStream(filePath, { start, end });
   stream.on('error', () => res.destroy());
   stream.pipe(res);
 }
@@ -1723,10 +2213,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
   if (url === '/api/models' && method === 'GET') return apiModels(res, session);
   if (url === '/api/blobs' && method === 'POST') return apiBlobUpload(req, res, session);
   const mBlob = /^\/api\/blobs\/([^/]+)$/.exec(url);
-  if (mBlob && method === 'GET') {
+  if (mBlob && (method === 'GET' || method === 'HEAD')) {
     const h = decodeURIComponent(mBlob[1]);
     if (!HASH_RE.test(h)) { sendJson(res, 400, { error: { message: '非法 blob hash' } }); return; }
-    return apiBlobGet(res, session, h);
+    return apiBlobGet(req, res, session, h);
   }
 
   // 会话集合
@@ -1744,6 +2234,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     const cid = decodeURIComponent(mImg[1]);
     if (!CONV_ID_RE.test(cid)) { sendJson(res, 400, { error: { message: '非法会话 id' } }); return; }
     return apiImages(req, res, session, cid);
+  }
+  const mVideo = /^\/api\/conversations\/([^/]+)\/videos$/.exec(url);
+  if (mVideo && method === 'POST') {
+    const cid = decodeURIComponent(mVideo[1]);
+    if (!CONV_ID_RE.test(cid)) { sendJson(res, 400, { error: { message: '非法会话 id' } }); return; }
+    return apiVideos(req, res, session, cid);
   }
   // 重连在途生成流（刷新后接上还没跑完的回复）
   const mStream = /^\/api\/conversations\/([^/]+)\/stream$/.exec(url);
@@ -1955,6 +2451,11 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 server.listen(PORT, () => {
   console.log(`Manifold chat-demo 已启动: http://localhost:${PORT}`);
   console.log(`上游 sub2api: ${BASE}`);
+  if (ARK_API_KEY && SUB2API_ADMIN_KEY) {
+    const recoverable = db.listRecoverableVideoTasks();
+    for (const row of recoverable) ensureVideoTaskRunning(row);
+    if (recoverable.length) console.log(`[seedance] 已恢复 ${recoverable.length} 个视频任务`);
+  }
 });
 
 // ── Blob GC：周期清理孤儿 blob ────────────────────────────────────

@@ -1,13 +1,13 @@
-# ManifoldNetwork · 对话与生图工作台
+# ManifoldNetwork · 对话与视觉创作工作台
 
-一个**相对独立**的聊天 + 图片生成工作台，不改 sub2api 任何东西：
+一个**相对独立**的聊天 + 图片 + 视频生成工作台，不改 sub2api 业务代码：
 
 ```
-浏览器 ──同源──> 本服务(server.js)
-                   ├─ /            静态前端（登录 / 聊天 / 生图）
-                   ├─ /store/*     会话存储（SQLite，按 sub2api 账号隔离）
-                   ├─ /api/v1/*  ──转发──> sub2api 用户接口（登录、key 列表）
-                   └─ /v1/*      ──转发──> sub2api 网关（聊天、识图、生图）
+浏览器 ──同源──> 本服务(server.ts)
+                   ├─ /                         静态前端（登录 / 对话 / 图像 / 视频）
+                   ├─ /api/conversations/*      消息、私有 blob 与后台生成任务
+                   ├─ sub2api                   登录、用户 key、聊天与余额结算
+                   └─ 火山方舟                  Seedream / Seedance（Key 仅在服务端）
 ```
 
 浏览器只跟本服务同源通信，所以 **sub2api 不需要改 CORS**。
@@ -17,14 +17,14 @@
 ## 跑起来
 
 ```powershell
-cd ManifoldNetwork
-node server.js                       # 默认上游 https://zstuacm.xyz，端口 8787
+cd chat-demo
+npm start                            # 默认上游 https://zstuacm.xyz，端口 8787
 ```
 
 自定义：
 
 ```powershell
-$env:SUB2API_BASE = "https://zstuacm.xyz"; $env:PORT = "8787"; node server.js
+$env:SUB2API_BASE = "https://zstuacm.xyz"; $env:PORT = "8787"; npm start
 ```
 
 打开 http://localhost:8787
@@ -39,6 +39,8 @@ $env:SUB2API_BASE = "https://zstuacm.xyz"; $env:PORT = "8787"; node server.js
 | 识图 | 上传图片（自动压到最长边 1568px），以 `image_url` base64 随消息发送 |
 | 生图 | 模型切到 `gpt-image-2`（输入区变琥珀色）→ 描述画面 → `POST /v1/images/generations` |
 | 垫图改图 | 生图模式下附参考图 + 描述 → 自动改走 `POST /v1/images/edits`（multipart） |
+| 视频 | 切到 `Seedance 2.0`（输入区变余像蓝）→ 选择 480P/720P/1080P、比例和 4–15 秒时长；任务后台运行，可刷新重连 |
+| 成片 | 方舟临时 URL 立即转存为账号私有 MP4；播放器支持手机内联播放与 HTTP Range 拖动 |
 | 会话 | 登录账号 → 对话存服务端 SQLite、**跨设备按账号同步**；仅贴 key（不登录）→ 存浏览器 IndexedDB |
 
 ## 前提（重要）
@@ -51,6 +53,8 @@ v1 只接 **openai 平台**的 key（一把 key 同时覆盖聊天 + 识图 + �
    （带 `/v1/images/generations` 和 `/v1/images/edits` 端点；旧版本会 404）。
 3. 用 anthropic 平台分组的 key 时聊天可用（自动转换），但生图会 404 ——
    sub2api 的 `/v1/images/*` 只对 openai 平台分组开放。
+4. Seedance 2.0 使用服务端现有 `ARK_API_KEY`，只对账号登录态开放；还需配置
+   `SUB2API_ADMIN_KEY`，用于按方舟返回的实际 `completion_tokens` 结算用户余额。
 
 ## 冒烟测试
 
@@ -77,4 +81,4 @@ curl -X POST http://localhost:8787/v1/images/generations `
   本 demo 未集成 Turnstile 小组件（自用一般不开）。
 - 普通聊天模型（gpt-5.x）走文本通道，**永远不会出图**——出图必须切 `gpt-image-2`。
   已给聊天加系统提示，模型会主动提醒用户切换。
-- 生成图片以 base64 存在浏览器 IndexedDB，清浏览器数据会丢；要长期保留请点「下载」。
+- 登录态生成的图片与视频均存为服务端私有 blob；仅贴 key 模式仍只在当前浏览器保存会话。
