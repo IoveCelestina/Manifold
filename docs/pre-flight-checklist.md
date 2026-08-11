@@ -124,7 +124,8 @@ docker ps   # 不报权限错就 OK
 ```bash
 cd ~/manifold
 bash scripts/init.sh
-# 打印的 admin password → 立刻抄到信息卡（这次不抄，下次重生成）
+# ADMIN_EMAIL / ADMIN_PASSWORD 已随机生成到 deploy/.env，不会打印到终端
+# 从这个权限为 600 的文件录入密码管理器
 ```
 
 ### C.2 编辑 .env
@@ -136,17 +137,17 @@ nano deploy/.env
 至少改这些（其它默认即可）：
 
 ```bash
-# 当前路线：CF Flexible 模式（CF 帮跑 HTTPS，源站 80 端口纯 HTTP）→ DOMAIN 留空
-# 以后想自签 LE 证书（CF 切灰云 / 不走 CF）：把 DOMAIN 填上 zstuacm.xyz
+# 生产推荐 CF Full (strict)；若暂时仍用 Flexible，也必须完成 §G 的源站白名单
 DOMAIN=
-ACME_EMAIL=Taohu0122@qq.com
+# ADMIN_EMAIL / ADMIN_PASSWORD 已由 init.sh 生成，保持原值
+ACME_EMAIL=<专用运维邮箱，不要提交真实值>
 GPG_RECIPIENT=<§E 第 2 步算出的 fingerprint 或 email>
 RCLONE_REMOTE=<空也行，先跳过，第 7 步再来加>
 TELEGRAM_BOT_TOKEN=<§F 第 1 步算出的 token，空则不告警>
 TELEGRAM_CHAT_ID=<§F 第 1 步算出的 chat id>
 ```
 
-`ADMIN_PASSWORD` 由 init.sh 自动生成，**不要手改**。
+`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 由 init.sh 自动生成，**不要改成可猜的固定值**。
 
 ### C.3 启栈
 
@@ -270,49 +271,66 @@ Telegram 收到了 → 把 token / chat id 填到 `deploy/.env`。
 
 ---
 
-## G. Cloudflare HTTPS（Flexible 模式）
+## G. Cloudflare HTTPS + 源站锁定
 
-当前路线：**CF 橙云开着 + SSL/TLS 模式 Flexible** —— CF 边缘对用户 HTTPS，CF↔源站走明文 HTTP。源站不需要签证书，`.env` 的 `DOMAIN=` 留空让 Caddy 监听 :80 纯 HTTP。
+生产目标是：用户只能访问 Cloudflare 边缘，源站公网的 TCP 80/443 只接受
+Cloudflare 官方出口网段。仅开启橙云不等于隐藏源站；若源站端口仍对所有地址开放，
+知道源站 IP 的人仍可绕过 Cloudflare 的 WAF、限流和访问日志。
 
 ```
-用户 ──HTTPS──> CF 边缘（CF 自动 *.zstuacm.xyz 证书）──HTTP──> 154.44.9.231:80 ──> Caddy ──> sub2api
+用户 ──HTTPS──> Cloudflare ──HTTP/HTTPS──> <ORIGIN_IP>:80/443 ──> Caddy
+非 Cloudflare 来源 ──X──> <ORIGIN_IP>:80/443
 ```
 
-### G.1 DNS 记录
+### G.1 DNS 与 TLS
 
-A 记录 `zstuacm.xyz → 154.44.9.231`、**Proxy 橙云 ON**。已设。`www` 同步加一条同样设置（可选）。
+- A/AAAA 记录填写真实 `<ORIGIN_IP>`，并开启 **Proxy（橙云）**。
+- 不要把真实源站 IP 写进 Git、Issue、CI 日志或截图。
+- Cloudflare SSL/TLS 推荐 **Full (strict)**；确认源站证书有效后再切换。
+- 暂时使用 Flexible 时，Cloudflare 到源站仍是明文 HTTP，但下面的来源白名单同样必做。
 
-### G.2 SSL/TLS 模式必须设 Flexible
+### G.2 先临时应用，再持久化
 
-CF → `zstuacm.xyz` → SSL/TLS → Overview → 选 **Flexible**
+`origin-firewall.sh` 同时挂到 `INPUT` 与 `DOCKER-USER`；后者用于拦住会绕过
+UFW/INPUT 的 Docker publish 流量。脚本不修改 SSH 或其它端口。
 
-> 错设 Full / Full(strict) 会导致 502：因为源站没装证书，CF 试图 HTTPS 回源会失败。
+```bash
+cd ~/manifold
+sudo bash scripts/origin-firewall.sh --apply
+sudo bash scripts/origin-firewall.sh --check
+```
 
-### G.3 验 HTTPS
+保持当前 SSH 会话，另开终端完成下一节验证。全部通过后再安装 systemd 持久化：
+
+```bash
+sudo bash scripts/origin-firewall.sh --install
+systemctl status manifold-origin-firewall.service --no-pager
+```
+
+Cloudflare 公布网段变化时，以 <https://www.cloudflare.com/ips/> 为准更新脚本，
+先 `--apply` 和回归，再提交并部署。
+
+### G.3 正向与绕过验证
 
 ```powershell
-curl -I https://zstuacm.xyz/health
-# 期望 HTTP/2 200；证书 issuer 是 Cloudflare（不是 Let's Encrypt）
+# 正常域名仍须成功
+curl.exe -fsS --max-time 10 https://zstuacm.xyz/health
+
+# 强制绕开 DNS、直连源站；两条都必须超时或连接失败，不能返回 HTTP
+curl.exe -I --connect-timeout 5 --resolve "zstuacm.xyz:80:<ORIGIN_IP>" http://zstuacm.xyz/health
+curl.exe -kI --connect-timeout 5 --resolve "zstuacm.xyz:443:<ORIGIN_IP>" https://zstuacm.xyz/health
+
+# SSH 必须仍可用
+ssh manifold "true"
 ```
 
-源站直接打也能通（明文 HTTP）：
+若正常域名失败，保持 SSH 会话并立即回滚实时规则：
 
-```powershell
-curl -I http://154.44.9.231/health
-# 期望 HTTP/1.1 200，由 Caddy 直接服务
+```bash
+sudo /usr/local/sbin/manifold-origin-firewall --disable 2>/dev/null \
+  || sudo bash scripts/origin-firewall.sh --disable
+sudo systemctl disable manifold-origin-firewall.service 2>/dev/null || true
 ```
-
-### G.4 未来想升级到端到端 HTTPS
-
-当前模式的代价：**CF↔源站这段是明文**，能被路径上任何监听者看到。对朋友试用阶段够用；正式收费前建议升级：
-
-| 升级到 | 怎么做 |
-|---|---|
-| **CF Full(strict) + CF Origin 证书** | CF → SSL/TLS → Origin Server → 生成 15 年证书 → 下载 cert.pem + key.pem 到 `deploy/data/caddy-certs/` → Caddyfile 加 `tls /path/to/cert.pem /path/to/key.pem` → CF 模式切 Full(strict) |
-| **CF Full(strict) + 自签 LE** | CF 切灰云 → `.env` 填 `DOMAIN=zstuacm.xyz` → Caddy 自动 LE 签证 → 签下后切回橙云 + Full(strict) |
-| **不走 CF** | CF 灰云（仅 DNS） → 同上 LE 自签流程 |
-
-任一升级路线都不动 Caddyfile 现有结构，看着选。
 
 ---
 
@@ -321,8 +339,10 @@ curl -I http://154.44.9.231/health
 逐条勾：
 
 ```
-[ ] curl https://zstuacm.xyz/health = 200（CF Flexible：证书 issuer 是 Cloudflare）
-[ ] nmap -p- zstuacm.xyz 只看到 22000 / 80 / 443（其余 stealth）
+[ ] curl https://zstuacm.xyz/health = 200（经 Cloudflare）
+[ ] 从非 Cloudflare 网络直连 <ORIGIN_IP>:80/443 超时或被过滤
+[ ] scripts/origin-firewall.sh --check 同时通过 IPv4 / IPv6
+[ ] SSH 管理端口仍可访问
 [ ] backup.sh 跑一次，远端 rclone 推到位
 [ ] DR 演练：另一台机器（或同台 ~/restore-test/）从今天备份能起出能用的栈
 [ ] Kuma 加完 6 个探针，Telegram 收到测试告警；故意 docker stop sub2api，5min 内告警到

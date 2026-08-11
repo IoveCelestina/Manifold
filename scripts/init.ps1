@@ -62,12 +62,10 @@ function Protect-SecretFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     if ($IsWindows) {
-        $acl = Get-Acl -LiteralPath $Path
-        # Remove inherited readers, then grant only the current account access.
+        # Build a DACL from scratch. Reusing Get-Acl + Set-Acl can carry SACL
+        # metadata and incorrectly require SeSecurityPrivilege for normal users.
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
         $acl.SetAccessRuleProtection($true, $false)
-        foreach ($accessRule in @($acl.Access)) {
-            [void]$acl.RemoveAccessRuleSpecific($accessRule)
-        }
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $accessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
             $currentUser,
@@ -75,7 +73,8 @@ function Protect-SecretFile {
             [System.Security.AccessControl.AccessControlType]::Allow
         )
         $acl.AddAccessRule($accessRule)
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        $fileInfo = [System.IO.FileInfo]::new((Resolve-Path -LiteralPath $Path).Path)
+        [System.IO.FileSystemAclExtensions]::SetAccessControl($fileInfo, $acl)
         return
     }
 
@@ -96,6 +95,7 @@ if (Confirm-Overwrite $envTarget) {
         JWT_SECRET            = New-HexSecret 32
         TOTP_ENCRYPTION_KEY   = New-HexSecret 32
         REDIS_PASSWORD        = New-HexSecret 24
+        ADMIN_EMAIL           = "admin+$((New-HexSecret 8))@manifold.invalid"
         ADMIN_PASSWORD        = New-HexSecret 12
     }
 
@@ -107,6 +107,7 @@ if (Confirm-Overwrite $envTarget) {
         JWT_SECRET          = $secrets.JWT_SECRET
         TOTP_ENCRYPTION_KEY = $secrets.TOTP_ENCRYPTION_KEY
         REDIS_PASSWORD      = $secrets.REDIS_PASSWORD
+        ADMIN_EMAIL         = $secrets.ADMIN_EMAIL
         ADMIN_PASSWORD      = $secrets.ADMIN_PASSWORD
     }
     Protect-SecretFile -Path $envTarget

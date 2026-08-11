@@ -181,26 +181,31 @@ sub2api 后台 → 用户管理 → 找到自己 → 改密
 ```bash
 # 1) 在本机生成新密码的 bcrypt hash
 NEW_PASS=$(openssl rand -hex 12)
+ADMIN_EMAIL=$(sed -n 's/^ADMIN_EMAIL=//p' deploy/.env | head -n 1)
 HASH=$(docker run --rm python:3-alpine sh -c \
   "pip install bcrypt -q && python -c \"import bcrypt; print(bcrypt.hashpw(b'$NEW_PASS', bcrypt.gensalt()).decode())\"")
 echo "new password: $NEW_PASS"
 echo "new hash:     $HASH"
 
-# 2) UPDATE 进 DB（确认列名后再跑，不同 sub2api 版本可能不一样）
-docker exec -i manifold-postgres psql -U sub2api -d sub2api <<SQL
-UPDATE users SET password_hash = '$HASH' WHERE email = 'admin@manifold.local';
+# 2) UPDATE 进 DB（按 .env 中随机生成的登录标识定位）
+docker exec -i manifold-postgres psql -U sub2api -d sub2api \
+  -v admin_email="$ADMIN_EMAIL" -v password_hash="$HASH" <<'SQL'
+UPDATE users
+SET password_hash = :'password_hash'
+WHERE email = :'admin_email' AND role = 'admin';
 SQL
 
 # 3) 用新密码登录验证
-curl -fsS http://127.0.0.1:8080/api/v1/auth/login \
-  -d "{\"email\":\"admin@manifold.local\",\"password\":\"$NEW_PASS\"}" \
+curl -fsS https://zstuacm.xyz/api/v1/auth/login \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$NEW_PASS\"}" \
   -H 'Content-Type: application/json'
 ```
 
 **注意**：如果 admin 启用了 2FA，路径 B 改完密码还要过 2FA 才能登录。如果连 2FA 也丢了：
 
 ```sql
-UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE email = 'admin@manifold.local';
+UPDATE users SET totp_secret = NULL, totp_enabled = false
+WHERE email = '<ADMIN_EMAIL_FROM_DEPLOY_ENV>' AND role = 'admin';
 ```
 
 只清 admin 一个人的 2FA，不影响别人。

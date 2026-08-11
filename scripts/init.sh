@@ -81,6 +81,7 @@ if confirm_overwrite "$ENV_TARGET"; then
   JWT_SECRET=$(hex 32)
   TOTP_ENCRYPTION_KEY=$(hex 32)
   REDIS_PASSWORD=$(hex 24)
+  ADMIN_EMAIL="admin+$(hex 8)@manifold.invalid"
   ADMIN_PASSWORD=$(hex 12)
 
   cp "$ENV_TEMPLATE" "$ENV_TARGET"
@@ -89,6 +90,7 @@ if confirm_overwrite "$ENV_TARGET"; then
   set_env_value "$ENV_TARGET" JWT_SECRET          "$JWT_SECRET"
   set_env_value "$ENV_TARGET" TOTP_ENCRYPTION_KEY "$TOTP_ENCRYPTION_KEY"
   set_env_value "$ENV_TARGET" REDIS_PASSWORD      "$REDIS_PASSWORD"
+  set_env_value "$ENV_TARGET" ADMIN_EMAIL         "$ADMIN_EMAIL"
   set_env_value "$ENV_TARGET" ADMIN_PASSWORD      "$ADMIN_PASSWORD"
   echo "[OK] $ENV_TARGET"
 else

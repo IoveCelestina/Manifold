@@ -99,8 +99,8 @@ services:
       TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY is required, run scripts/init.ps1}"
 
       # 管理员账号
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@manifold.local}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?ADMIN_EMAIL is required in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required in .env}
 
       # 日志
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -135,12 +135,12 @@ services:
         condition: service_healthy
     environment:
       DOMAIN: ${DOMAIN:-:80}
-      ACME_EMAIL: ${ACME_EMAIL:-Taohu0122@qq.com}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required in .env}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "80:80"
       - "443:443"
-      - "443:443/udp"   # HTTP/3 QUIC
+      # Cloudflare 对源站使用 TCP；不发布 UDP/443，减少可绕过代理的入口。
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./brand:/srv/brand:ro             # 品牌静态资源兜底，如 /manifold.svg

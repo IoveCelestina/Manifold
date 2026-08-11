@@ -2,7 +2,7 @@
 # 直接编辑可热加载；git pull 替换文件后应 force-recreate caddy，避免 bind mount 仍引用旧 inode。
 
 {
-	email {$ACME_EMAIL:Taohu0122@qq.com}
+	email {$ACME_EMAIL}
 	admin localhost:2019
 
 	# 站点在 Cloudflare 后面: 信任 CF 网段, 从 CF-Connecting-IP 取真实客户端 IP

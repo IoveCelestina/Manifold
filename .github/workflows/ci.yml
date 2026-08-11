@@ -23,9 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 扫描 Git 已跟踪文件
-        run: bash scripts/check-secrets.sh
+      - name: 扫描当前文件和完整可达历史
+        run: bash scripts/check-secrets.sh --history
 
   # ─── compose 校验：发现错别字 / 网络拼写 / required var 漏配 ──────
   compose-validate:
@@ -43,6 +45,9 @@ jobs:
           sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci-fake-pg-password|' .env
           sed -i 's|^JWT_SECRET=.*|JWT_SECRET=ci-fake-jwt-secret-32-bytes-XXXXXXX|' .env
           sed -i 's|^TOTP_ENCRYPTION_KEY=.*|TOTP_ENCRYPTION_KEY=ci-fake-totp-key-32-bytes-XXXXXXXX|' .env
+          sed -i 's|^ADMIN_EMAIL=.*|ADMIN_EMAIL=ci-admin@manifold.invalid|' .env
+          sed -i 's|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=ci-fake-admin-password|' .env
+          sed -i 's|^ACME_EMAIL=.*|ACME_EMAIL=ci-acme@example.invalid|' .env
 
       - name: docker compose config
         working-directory: deploy
