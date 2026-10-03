@@ -185,7 +185,7 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3000"
-      VINEXT_TRUSTED_HOSTS: blog.zstuacm.xyz
+      VINEXT_TRUSTED_HOSTS: blog.zstuacm.xyz,blog.zstu.asia
       TZ: ${TZ:-Asia/Shanghai}
     networks:
       - manifold-edge

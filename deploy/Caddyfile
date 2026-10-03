@@ -12,7 +12,7 @@
 	}
 }
 
-zstuacm.xyz, www.zstuacm.xyz {
+zstuacm.xyz, www.zstuacm.xyz, zstu.asia, www.zstu.asia {
 	encode gzip zstd
 
 	reverse_proxy sub2api:8080 {
@@ -36,7 +36,7 @@ zstuacm.xyz, www.zstuacm.xyz {
 	}
 }
 
-chat.zstuacm.xyz {
+chat.zstuacm.xyz, chat.zstu.asia {
     encode gzip zstd
 
     reverse_proxy manifold-chat-demo:8787 {
@@ -59,7 +59,7 @@ chat.zstuacm.xyz {
     }
 }
 
-blog.zstuacm.xyz {
+blog.zstuacm.xyz, blog.zstu.asia {
     encode gzip zstd
 
     reverse_proxy manifold-blog:3000 {
