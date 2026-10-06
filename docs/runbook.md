@@ -264,16 +264,15 @@ sed -i.bak "s|^ACME_EMAIL=.*|ACME_EMAIL=new@example.com|" deploy/.env
 docker compose up -d --force-recreate caddy   # caddy 重启拉新 env
 ```
 
-**DOMAIN 改动 / 上线第一次设 DOMAIN**：
+**域名改动**：主站、www、chat、blog 由域名更新脚本统一管理，完整参数与回滚见 [域名更新](domain-update.md)。旧 `DOMAIN` 字段不再控制路由。
 
 ```bash
-# 1) 先把域名 A 记录指到服务器 IP，DNS 生效（dig +short manifold.com 看到你的 IP）
-# 2) 改 .env
-sed -i.bak "s|^DOMAIN=.*|DOMAIN=manifold.example.com|" deploy/.env
-# 3) 重启 caddy
-docker compose up -d --force-recreate caddy
-# 4) 看证书签发日志
-docker logs manifold-caddy --tail 100 2>&1 | grep -i "certificate\|obtain\|tls"
+# 先配置主域名及 www/chat/blog 的 DNS，然后预览并执行
+bash scripts/update-domains.sh --list
+bash scripts/update-domains.sh --add new.example.com --dry-run
+bash scripts/update-domains.sh --add new.example.com --deploy
+# 不再需要旧域名时，单独删除；其他域名保留
+bash scripts/update-domains.sh --remove old.example.com --deploy
 ```
 
 **验证**：
@@ -285,7 +284,7 @@ echo | openssl s_client -connect manifold.example.com:443 -servername manifold.e
   | openssl x509 -noout -issuer
 ```
 
-**回滚**：DOMAIN 清空，caddy 重启，退回 HTTP-only `:80` 模式。证书数据保留在 `data/caddy/data`，下次再改回 DOMAIN 立刻能用，不重新签。
+**回滚**：部署或访问验证失败时脚本自动尝试恢复原配置。也可从脚本输出的 `backups/domains-*/previous.env` 恢复 `.env`，再重建 blog 和 caddy；详见域名更新文档。证书数据保留在 `data/caddy/data`。
 
 ---
 

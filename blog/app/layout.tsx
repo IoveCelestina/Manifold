@@ -6,7 +6,7 @@ import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://blog.zstuacm.xyz"),
+  metadataBase: new URL(process.env.BLOG_SITE_URL || "https://blog.zstuacm.xyz"),
   title: { default: "Clestiana Blog", template: "%s · Clestiana Blog" },
   description: "记录技术实践、项目复盘、算法竞赛、阅读与生活的个人博客。",
   openGraph: {

@@ -12,7 +12,7 @@
 	}
 }
 
-zstuacm.xyz, www.zstuacm.xyz, zstu.asia, www.zstu.asia {
+{$SITE_DOMAINS:zstuacm.xyz, www.zstuacm.xyz, zstu.asia, www.zstu.asia} {
 	encode gzip zstd
 
 	reverse_proxy sub2api:8080 {
@@ -36,7 +36,7 @@ zstuacm.xyz, www.zstuacm.xyz, zstu.asia, www.zstu.asia {
 	}
 }
 
-chat.zstuacm.xyz, chat.zstu.asia {
+{$CHAT_DOMAINS:chat.zstuacm.xyz, chat.zstu.asia} {
     encode gzip zstd
 
     reverse_proxy manifold-chat-demo:8787 {
@@ -59,7 +59,7 @@ chat.zstuacm.xyz, chat.zstu.asia {
     }
 }
 
-blog.zstuacm.xyz, blog.zstu.asia {
+{$BLOG_DOMAINS:blog.zstuacm.xyz, blog.zstu.asia} {
     encode gzip zstd
 
     reverse_proxy manifold-blog:3000 {

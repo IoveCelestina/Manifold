@@ -17,6 +17,17 @@ on:
 
 jobs:
 
+  domain-update-tests:
+    name: domain update scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 配置更新与故障回滚测试（模拟 Docker/HTTP，不访问生产）
+        run: python3 scripts/tests/update-domains.tests.py
+      - name: PowerShell SSH 参数测试（不连接服务器）
+        shell: pwsh
+        run: ./scripts/tests/update-domains.remote.tests.ps1
+
   # ─── 凭据/运行数据防误提交（零外部依赖，不回显命中内容） ──────────
   secret-hygiene:
     name: secret hygiene

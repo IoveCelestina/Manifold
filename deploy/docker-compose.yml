@@ -121,10 +121,8 @@ services:
       retries: 5
 
   # ─── 外层反向代理：Caddy（仅它对外暴露 80/443） ────────────
-  # 模式由 .env 里的 DOMAIN 切：
-  #   DOMAIN=空                → 只听 :80，IP 直连（联调/内测用，无 HTTPS）
-  #   DOMAIN=manifold.example  → 自动 Let's Encrypt 签证书 + 80 跳 443
-  # 改 Caddyfile 后不停服：docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+  # 域名由 .env 的 SITE_DOMAINS / CHAT_DOMAINS / BLOG_DOMAINS 控制。
+  # 使用 scripts/update-domains.sh 更新；环境变量变化需要重建 Caddy 容器。
   caddy:
     # caddy:2.11-alpine  (pulled 2026-05-20)
     image: caddy@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
@@ -134,7 +132,9 @@ services:
       sub2api:
         condition: service_healthy
     environment:
-      DOMAIN: ${DOMAIN:-:80}
+      SITE_DOMAINS: "${SITE_DOMAINS:-zstuacm.xyz, www.zstuacm.xyz, zstu.asia, www.zstu.asia}"
+      CHAT_DOMAINS: "${CHAT_DOMAINS:-chat.zstuacm.xyz, chat.zstu.asia}"
+      BLOG_DOMAINS: "${BLOG_DOMAINS:-blog.zstuacm.xyz, blog.zstu.asia}"
       ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required in .env}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
@@ -185,7 +185,8 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3000"
-      VINEXT_TRUSTED_HOSTS: blog.zstuacm.xyz,blog.zstu.asia
+      VINEXT_TRUSTED_HOSTS: "${BLOG_TRUSTED_HOSTS:-blog.zstuacm.xyz,blog.zstu.asia}"
+      BLOG_SITE_URL: "${BLOG_SITE_URL:-https://blog.zstuacm.xyz}"
       TZ: ${TZ:-Asia/Shanghai}
     networks:
       - manifold-edge

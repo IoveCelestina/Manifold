@@ -19,6 +19,8 @@ test("server-renders the blog home page", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
+  const shareImage = new URL("/og.png", process.env.BLOG_SITE_URL || "https://blog.zstuacm.xyz").href;
+  assert.ok(html.includes(`content="${shareImage}"`), "share image must use the runtime blog domain");
   assert.match(html, /CLESTIANA/);
   assert.match(html, /这里是我的个人博客/);
   assert.match(html, /项目复盘/);
