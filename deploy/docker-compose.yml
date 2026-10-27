@@ -18,8 +18,8 @@ services:
   # 镜像版本固定到 digest —— 升级流程：先在 staging 改 digest 跑通，再到 prod 改。
   # 别用 :latest 或滚动的 :alpine，否则 docker compose up 可能拉到 breaking change 直接挂。
   postgres:
-    # postgres:17-alpine  (pulled 2026-05-20)
-    image: postgres@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+    # PostgreSQL 17.11 (security update 2026-10-26)
+    image: postgres@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
     container_name: manifold-postgres
     restart: unless-stopped
     environment:
@@ -38,8 +38,8 @@ services:
       retries: 10
 
   redis:
-    # redis:8-alpine  (pulled 2026-05-20)
-    image: redis@sha256:d146f83b1e0f02fc27c26a50cee39338c736674c5959db84363e6ae3cd9e02d2
+    # Redis 8.6.7 (security update 2026-10-26)
+    image: redis@sha256:7033ad495c19b6bca38aea38f9130d1a3d5b647ac94f3ebe644c8c0fb804e039
     container_name: manifold-redis
     restart: unless-stopped
     environment:
@@ -57,8 +57,8 @@ services:
 
   # ─── 前台网关：sub2api（后续替换为 Manifold 重构镜像） ──────
   sub2api:
-    # sub2api 0.2.13 (pulled 2026-10-06)
-    image: weishaw/sub2api@sha256:73797a8b44894c7b65c0bfcefe6002c7f3cfba6223f01e9d909c1d31365fcdf8
+    # sub2api 0.2.18 (pulled 2026-10-26)
+    image: weishaw/sub2api@sha256:468a0b0e541e4becc05f1cf57826159235ea27a49a09f3dc2da6a43fcc05a22d
     container_name: manifold-sub2api
     restart: unless-stopped
     security_opt:
@@ -124,8 +124,10 @@ services:
   # 域名由 .env 的 SITE_DOMAINS / CHAT_DOMAINS / BLOG_DOMAINS 控制。
   # 使用 scripts/update-domains.sh 更新；环境变量变化需要重建 Caddy 容器。
   caddy:
-    # caddy:2.11-alpine  (pulled 2026-05-20)
-    image: caddy@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
+    build:
+      context: ./caddy
+    # Caddy 2.11.7 rebuilt with Go 1.27.3
+    image: manifold/caddy:security-20261026
     container_name: manifold-caddy
     restart: unless-stopped
     depends_on:
@@ -155,8 +157,8 @@ services:
   #   远端：ssh -L 3001:127.0.0.1:3001 vps，然后本机浏览器开 http://127.0.0.1:3001
   # 首次启动后必须立刻设管理员账号；具体配什么探针看 docs/monitoring.md
   kuma:
-    # uptime-kuma 2.3.2  (pulled 2026-05-20)
-    image: louislam/uptime-kuma@sha256:9aeb4e51d038047f414309c77a1af553281ca535723cb88907d907269d0a908e
+    # Uptime Kuma 2.5.7 (Node 22.23.4)
+    image: louislam/uptime-kuma@sha256:4b95dbe7ac5343b768f8e04e3035ccd59997872b1a35ab9b0f082d2cc279070e
     container_name: manifold-kuma
     restart: unless-stopped
     ports:
@@ -178,7 +180,7 @@ services:
   blog:
     build:
       context: ../blog
-    image: manifold/blog:local
+    image: manifold/blog:security-20261026
     container_name: manifold-blog
     restart: unless-stopped
     environment:
@@ -201,7 +203,7 @@ services:
   chat-demo:
     build:
       context: ../chat-demo
-    image: manifold/chat-demo:local
+    image: manifold/chat-demo:security-20261026
     container_name: manifold-chat-demo
     restart: unless-stopped
     stop_grace_period: 35s
