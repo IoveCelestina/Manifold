@@ -1,9 +1,9 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Manifold 一键初始化：生成密钥并填充 deploy/.env。
+    Manifold 一键初始化：生成密钥并填充 deploy/.env 与 deploy/devin2api/config.yaml。
 .DESCRIPTION
-    用密码学安全随机数生成 POSTGRES/JWT/TOTP/REDIS/ADMIN 密码。
+    用密码学安全随机数生成 POSTGRES/JWT/TOTP/REDIS/ADMIN 密码和 devin2api 面板密码。
     已存在的文件默认询问是否覆盖，加 -Force 跳过询问。
 .EXAMPLE
     .\scripts\init.ps1
@@ -120,8 +120,32 @@ if (Test-Path -LiteralPath $envTarget) {
     Protect-SecretFile -Path $envTarget
 }
 
+# 生成 deploy/devin2api/config.yaml：只含面板密码；Devin 凭据和下游令牌在 devin2api 面板里管理
+$devinTarget = Join-Path $DeployDir 'devin2api/config.yaml'
+if (Confirm-Overwrite $devinTarget) {
+    $devinTemplate = Join-Path $DeployDir 'devin2api/config.example.yaml'
+    Copy-Item -Path $devinTemplate -Destination $devinTarget -Force
+    Protect-SecretFile -Path $devinTarget
+    # 模板里两格缩进的 password 只有 dashboard.password 一处
+    $lines = [string[]](Get-Content -Path $devinTarget)
+    $index = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.StartsWith('  password: ') })
+    if ($index -lt 0) {
+        throw "模板里没有以 '  password: ' 开头的行：$devinTemplate"
+    }
+    $lines[$index] = "  password: `"$(New-HexSecret 16)`""
+    Set-Content -Path $devinTarget -Value $lines -Encoding utf8
+    Protect-SecretFile -Path $devinTarget
+    Write-Host "[OK] $devinTarget"
+} else {
+    Write-Host "[SKIP] $devinTarget"
+}
+
+if (Test-Path -LiteralPath $devinTarget) {
+    Protect-SecretFile -Path $devinTarget
+}
+
 Write-Host ""
-Write-Host "管理员凭据已写入 $envTarget（仅当前用户可访问；密码不会输出到终端）。" -ForegroundColor Cyan
+Write-Host "管理员凭据已写入 $envTarget，devin2api 面板密码已写入 $devinTarget（仅当前用户可访问；密码不会输出到终端）。" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "下一步：" -ForegroundColor Yellow
 Write-Host "  cd deploy"

@@ -1,0 +1,2 @@
+# 构建只用 FROM + RUN，不需要任何上下文文件；尤其不能把含面板密码的 config.yaml 发给 docker
+*

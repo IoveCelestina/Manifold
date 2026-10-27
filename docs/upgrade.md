@@ -44,6 +44,7 @@ image: weishaw/sub2api@sha256:f242f8504c9cb3c89f2a9531b1491a83d9bc7f3648a649c2c3
 - [sub2api 升级](#sub2api-升级)
 - [Caddy 升级](#caddy-升级)
 - [Uptime Kuma 升级](#uptime-kuma-升级)
+- [devin2api 升级](#devin2api-升级)
 - [Redis minor 升级](#redis-minor-升级)
 - [Postgres minor 升级](#postgres-minor-升级)
 - [Postgres major 升级（危险）](#postgres-major-升级危险)
@@ -182,6 +183,52 @@ docker compose stop kuma
 # 如果 schema 已经被新版升级了，旧版起不来 —— 恢复 kuma.db
 cp deploy/data/uptime-kuma/kuma.db.bak-YYYYMMDD deploy/data/uptime-kuma/kuma.db
 docker compose up -d kuma
+```
+
+---
+
+## devin2api 升级
+
+**影响范围**：经 devin2api 的 sub2api 分组短暂不可用。停止时进程最多排空 600s 等在途流跑完（compose 给了 660s 宽限），之后重启约数秒。容器里面板的「一键更新」不可用（返回 501），只能换镜像。
+
+**镜像结构**：官方 GHCR 0.18.0 镜像里的二进制缺执行位，不能直接用。`deploy/devin2api/Dockerfile` 以官方镜像（按 digest 钉死）为基础只补 `chmod`，compose 用本地构建出的 `manifold/devin2api:<版本>`。上游修好以后可以改回直接用官方镜像。
+
+**准备**：
+- 读 [release notes](https://github.com/WncFht/devin2api/releases)。新版启动时会对 `devin-2api.db` 跑 schema 迁移，旧版不一定能读迁移后的库。
+- 取新 digest（GHCR tag 不带 `v` 前缀，多架构）：
+  ```bash
+  docker buildx imagetools inspect ghcr.io/wncfht/devin2api:<X.Y.Z> | sed -n 's/^Digest: *//p'
+  ```
+
+**步骤**：
+
+```bash
+$EDITOR deploy/devin2api/Dockerfile   # 换 FROM 的 digest 和注释里的版本
+$EDITOR deploy/docker-compose.yml     # devin2api 的 image tag 和注释改成新版本
+cd deploy && docker compose build devin2api   # 构建时会跑一次 -version，二进制起不来这里就失败
+# 先停再备份：进程退出后 db 与 -wal/-shm 是一致的
+docker compose stop devin2api
+cp -a data/devin2api "data/devin2api.bak-$(date +%Y%m%d)"
+docker compose up -d devin2api
+```
+
+**验证**：
+
+```bash
+docker compose ps devin2api                         # healthy
+curl -fsS http://127.0.0.1:3033/healthz             # version 是新版本
+curl -fsS -H "Authorization: Bearer <下游令牌>" http://127.0.0.1:3033/v1/models | head -c 300
+```
+
+**回滚**：
+
+```bash
+git checkout deploy/docker-compose.yml
+cd deploy && docker compose stop devin2api
+# schema 已被新版迁移时旧版可能起不来 —— 换回升级前的状态目录
+mv data/devin2api "data/devin2api.failed-$(date +%Y%m%d)"
+cp -a data/devin2api.bak-YYYYMMDD data/devin2api
+docker compose up -d devin2api
 ```
 
 ---

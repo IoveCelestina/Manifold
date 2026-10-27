@@ -24,6 +24,7 @@
 - [GPG 备份密钥轮换](#gpg-备份密钥轮换)
 - [ACME_EMAIL / DOMAIN 改动](#acme_email--domain-改动)
 - [整套 compose 升级](#整套-compose-升级)
+- [devin2api 上线与接入 sub2api](#devin2api-上线与接入-sub2api)
 
 ---
 
@@ -320,3 +321,59 @@ docker logs manifold-<service> --tail 100
 **postgres 升级（major version 跳跃）特别注意**：postgres major 版本升级（17 → 18）**不能**只换 image 然后重启 —— data 目录格式不兼容。必须走 `pg_dump → 升级 → pg_restore` 流程。这种属于一次性活动，参考 [docs/backup-restore.md](backup-restore.md)。
 
 **回滚**：把 digest 改回老的，`docker compose up -d --force-recreate <service>`。
+
+---
+
+## devin2api 上线与接入 sub2api
+
+devin2api 把 Devin 账号的模型转成 Anthropic Messages / OpenAI Responses / Chat 协议。在 Manifold 里它是 sub2api 的一个上游：sub2api 负责用户、分组、计费，devin2api 只负责协议转换和 Devin 侧的限流。
+
+**影响范围**：新增 `manifold-devin2api` 容器，不重启 sub2api / caddy。只有绑定到 Devin 分组的 sub2api 用户会走它。
+
+**准备**：
+- 一个 Devin 账号凭据。推荐 app.devin.ai → Settings → API keys 签发的 `cog_...` platform key：它不过期，上游判定 session 失效时 devin2api 会用它自动换新 token。
+- 知晓风险：devin2api 是非官方适配器，调用的是 Devin 内部接口，上游一改就可能失效；项目定位是个人使用，经 sub2api 多人共享同一个 Devin 账号有被封号的可能。
+
+**步骤**：
+
+```bash
+# 1) 生成 deploy/devin2api/config.yaml（含随机面板密码）。已有 .env 时提示覆盖选 N
+bash scripts/init.sh
+
+# 2) 启动并等 healthy
+cd deploy && docker compose up -d devin2api
+docker compose ps devin2api
+
+# 3) 在工作电脑上开隧道，浏览器进 http://127.0.0.1:3033/web
+ssh -L 3033:127.0.0.1:3033 vps
+# 面板密码
+ssh vps "sed -n 's/^  password: //p' /opt/manifold/deploy/devin2api/config.yaml"
+```
+
+4) 面板里按顺序做：
+   - `/web/tokens.html` 先建一个给 sub2api 用的下游令牌，明文只出示一次，存进密码管理器。令牌仓为空时 `/v1` 不校验身份，所以这步排第一。
+   - `/web/accounts.html` 添加 Devin 账号，填 `api_key`。
+
+```bash
+# 5) 验证 devin2api 自身；返回的 id 就是可用的上游模型名
+curl -fsS -H "Authorization: Bearer <下游令牌>" http://127.0.0.1:3033/v1/models
+```
+
+6) sub2api 后台：
+   - 新建分组（如 `devin`），平台 Anthropic。不要和真 Claude 账号放同一组，两边的 thinking 签名不能混用。
+   - 新建账号：平台 Anthropic，类型 API Key，Base URL `http://devin2api:8080`，API Key 填第 4 步的下游令牌，绑到该分组。sub2api 会自己拼 `/v1/messages`。
+   - 模型映射：Claude Code 会在本地拒绝不认识的模型名，所以把客户端认识的名字映射到上游模型，例如 `claude-sonnet-4-6` → `swe-2-max`。
+   - 计费：`swe-2-max` 这类名字不在 sub2api 内置价格表里。查不到价时 sub2api（至少 OpenAI 路径）按 0 费用落账，只打一条 `pricing_missing_record_zero_cost` 警告日志，等于白送。要在渠道定价里给该分组用到的模型配价，并以使用记录里显示的计费模型名为准核对。
+   - 给 Codex 用时另建 OpenAI 平台的 API Key 账号和分组，Base URL 同样填 `http://devin2api:8080`，sub2api 会拼 `/v1/responses`。
+
+**验证**：
+- 用该分组的 sub2api key 发一次请求，sub2api 使用记录里出现这个账号，费用不为 0
+- devin2api 面板的请求页能看到同一请求
+
+**隐私与排障**：模板里 `debug.errors_only: true`，正常完成的请求不留正文，只有失败请求保留完整调试记录（默认 14 天）。临时排查时可在面板设置里关掉 errors_only，查完再打开。
+
+**备份**：`scripts/backup.sh` 会带上 `devin-2api.db` 快照和 `deploy/devin2api/config.yaml`，详见 [备份与恢复](backup-restore.md)。
+
+**回滚**：
+- sub2api 后台停用该账号，流量立即不再进 devin2api
+- `cd deploy && docker compose stop devin2api`。`data/devin2api` 保留，重新启动后账号和令牌都还在

@@ -25,7 +25,7 @@ DO_BUILD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --services) SERVICES="$2"; shift 2 ;;
-    --all)      SERVICES="postgres redis sub2api caddy blog chat-demo kuma"; shift ;;
+    --all)      SERVICES="postgres redis sub2api devin2api caddy blog chat-demo kuma"; shift ;;
     --caddy)    SERVICES="caddy"; shift ;;
     --blog)     SERVICES="blog"; DO_BUILD=1; shift ;;
     --chat)     SERVICES="chat-demo"; DO_BUILD=1; shift ;;
@@ -46,6 +46,10 @@ if [[ "$DO_PULL" -eq 1 ]]; then
 fi
 
 [[ -f "${DEPLOY_DIR}/.env" ]] || die "缺少 ${DEPLOY_DIR}/.env 文件"
+# 单文件 bind mount 的源不存在时 docker 会建一个同名空目录，devin2api 随后读配置失败
+if [[ " $SERVICES " =~ " devin2api " && ! -f "${DEPLOY_DIR}/devin2api/config.yaml" ]]; then
+  die "缺少 ${DEPLOY_DIR}/devin2api/config.yaml，先跑 scripts/init.sh 生成（已有 .env 时选 N 保留）"
+fi
 
 cd "$DEPLOY_DIR"
 

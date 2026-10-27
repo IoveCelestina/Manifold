@@ -41,6 +41,7 @@ ssh -L 3001:127.0.0.1:3001 vps
 | sub2api-health | HTTP(s) | `http://sub2api:8080/health` | 60s | 主网关心跳，挂了 = 全员断服 |
 | postgres | TCP Port | `postgres` : `5432` | 60s | 数据库 socket 通不代表能查询，但够预警 |
 | redis | TCP Port | `redis` : `6379` | 60s | 同上 |
+| devin2api-health | HTTP(s) - Keyword | `http://devin2api:8080/healthz` | 60s | 关键词 `"status":"ok"`；只影响 Devin 分组 |
 | (公网入口) | HTTP(s) - Keyword | `https://你的域名/health` | 60s | 关键词 `"status":"ok"`；DOMAIN 模式下才加 |
 
 ## Telegram 告警

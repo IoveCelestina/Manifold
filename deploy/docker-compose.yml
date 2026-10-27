@@ -1,7 +1,7 @@
-# Manifold deploy compose —— sub2api 网关 + chat-demo + 数据/监控/反代
+# Manifold deploy compose —— sub2api 网关 + devin2api 上游 + chat-demo + 数据/监控/反代
 #
 # 设计原则：
-#   - sub2api 用固定 digest 镜像（升级流程见 docs/upgrade.md）
+#   - sub2api / devin2api 用固定 digest 镜像（升级流程见 docs/upgrade.md）
 #   - chat-demo 从 ../chat-demo 本地构建（聊天 + 生图）
 #   - 所有持久化数据集中在 ./data/ 下，便于备份和迁移
 #
@@ -116,6 +116,44 @@ services:
       - manifold-edge       # 用于被 caddy 反代
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ─── Devin 上游适配：devin2api（作为 sub2api 的一个上游账号） ──
+  # 把 Devin 账号的模型转成 Anthropic Messages / OpenAI Responses / Chat 协议。
+  # sub2api 后台建 API Key 账号接入：base_url = http://devin2api:8080，
+  # api_key = devin2api 面板 /web/tokens.html 创建的下游令牌。
+  # 不接 manifold-edge、不经 Caddy 对外；面板只绑本机端口，远端走 SSH 隧道：
+  #   ssh -L 3033:127.0.0.1:3033 vps，然后本机浏览器开 http://127.0.0.1:3033/web
+  # 首次启动前先跑 scripts/init.sh 生成 ./devin2api/config.yaml（含面板密码）。
+  # 上线、接入、升级步骤见 docs/runbook.md「devin2api 上线与接入 sub2api」。
+  devin2api:
+    # 官方镜像（digest 钉在 ./devin2api/Dockerfile）二进制缺执行位，本地补一层再用
+    build:
+      context: ./devin2api
+    # devin2api 0.18.0 (pulled 2026-10-27)
+    image: manifold/devin2api:0.18.0
+    container_name: manifold-devin2api
+    restart: unless-stopped
+    # 收到 SIGTERM 后进程最多排空 600s 让在途流跑完；不放宽的话 docker 10s 就强杀。
+    stop_grace_period: 660s
+    security_opt:
+      - no-new-privileges:true
+    command: ["-config", "/app/config.yaml", "-state-dir", "/app/state"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 仅本机绑定 —— 管理面板 /web 和调试用；sub2api 走容器内网访问
+      - "127.0.0.1:3033:8080"
+    volumes:
+      - ./devin2api/config.yaml:/app/config.yaml:ro
+      # SQLite 状态库：Devin 账号凭据、下游令牌、请求日志、限流闩状态
+      - ./data/devin2api:/app/state
+    networks:
+      - manifold-upstream   # 出网连 Devin 上游；sub2api 也在这个网络里访问它
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -235,7 +273,8 @@ networks:
     name: manifold-data
     driver: bridge
     internal: true
-  # 上游层：sub2api 出网调厂商 API，因此不设 internal
+  # 上游层：sub2api / devin2api 出网调厂商 API，因此不设 internal；
+  # sub2api → devin2api 的内网调用也走这里
   manifold-upstream:
     name: manifold-upstream
     driver: bridge

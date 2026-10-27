@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manifold 一键初始化（bash 版，对应 init.ps1）
 #
-# 用密码学安全随机数生成所有密钥并填充 deploy/.env。
+# 用密码学安全随机数生成所有密钥并填充 deploy/.env 与 deploy/devin2api/config.yaml。
 # 不调任何 API，纯本地操作 —— 把 sub2api 起起来之前先跑这个。
 #
 # 用法：
@@ -44,16 +44,16 @@ confirm_overwrite() {
   [[ "$resp" == "y" || "$resp" == "Y" ]]
 }
 
-# 替换 KEY=VAL 形式的一行；只改第一处匹配。
+# 把第一行以 prefix 开头的行替换成 prefix + value；只改第一处匹配。
 # 全程由 bash 写入，避免把密钥放进 sed/awk 的进程参数。
-set_env_value() {
-  local file="$1" key="$2" value="$3"
+set_prefixed_line() {
+  local file="$1" prefix="$2" value="$3"
   local line found=0 tmp
   tmp="$(mktemp "${file}.tmp.XXXXXX")"
 
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$found" -eq 0 && "$line" == "${key}="* ]]; then
-      printf '%s=%s\n' "$key" "$value" >>"$tmp"
+    if [[ "$found" -eq 0 && "$line" == "${prefix}"* ]]; then
+      printf '%s%s\n' "$prefix" "$value" >>"$tmp"
       found=1
     else
       printf '%s\n' "$line" >>"$tmp"
@@ -62,13 +62,16 @@ set_env_value() {
 
   if [[ "$found" -ne 1 ]]; then
     rm -f "$tmp"
-    echo "模板里没有 $key= 这一行：$file" >&2
+    echo "模板里没有以 '$prefix' 开头的行：$file" >&2
     exit 1
   fi
 
   chmod 600 "$tmp"
   mv -f "$tmp" "$file"
 }
+
+# 替换 KEY=VAL 形式的一行
+set_env_value() { set_prefixed_line "$1" "$2=" "$3"; }
 
 # ─── deploy/.env ───────────────────────────────────────────
 ENV_TARGET="$DEPLOY_DIR/.env"
@@ -100,8 +103,28 @@ fi
 # Existing files are tightened too, including when overwrite was declined.
 [[ -f "$ENV_TARGET" ]] && chmod 600 "$ENV_TARGET"
 
+# ─── deploy/devin2api/config.yaml ──────────────────────────
+# 只含面板密码；Devin 凭据和下游令牌在 devin2api 面板里管理，存在 data/devin2api。
+DEVIN_TARGET="$DEPLOY_DIR/devin2api/config.yaml"
+DEVIN_TEMPLATE="$DEPLOY_DIR/devin2api/config.example.yaml"
+[[ -f "$DEVIN_TEMPLATE" ]] || { echo "找不到 $DEVIN_TEMPLATE" >&2; exit 1; }
+
+if confirm_overwrite "$DEVIN_TARGET"; then
+  DASHBOARD_PASSWORD=$(hex 16)
+  cp "$DEVIN_TEMPLATE" "$DEVIN_TARGET"
+  chmod 600 "$DEVIN_TARGET"
+  # 模板里两格缩进的 password 只有 dashboard.password 一处
+  set_prefixed_line "$DEVIN_TARGET" "  password: " "\"$DASHBOARD_PASSWORD\""
+  echo "[OK] $DEVIN_TARGET"
+else
+  echo "[SKIP] $DEVIN_TARGET"
+fi
+
+[[ -f "$DEVIN_TARGET" ]] && chmod 600 "$DEVIN_TARGET"
+
 echo ""
-echo "管理员凭据已写入 $ENV_TARGET（权限 600；密码不会输出到终端）。"
+echo "管理员凭据已写入 $ENV_TARGET，devin2api 面板密码已写入 $DEVIN_TARGET"
+echo "（权限 600；密码不会输出到终端）。"
 echo ""
 echo "下一步："
 echo "  cd deploy"

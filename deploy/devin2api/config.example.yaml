@@ -1,0 +1,32 @@
+# Manifold 版 devin2api 配置模板（上游完整模板见 WncFht/devin2api 的 config.example.yaml）
+#
+# 用法：scripts/init.sh（或 init.ps1）复制成同目录 config.yaml 并填随机面板密码。
+# config.yaml 已 gitignore，不要提交。未知字段会被 devin2api 拒绝启动。
+#
+# 这里不放 Devin 凭据：账号（推荐 cog_ 开头的 platform API key）在面板
+# /web/accounts.html 添加，下游令牌在 /web/tokens.html 创建，都存进
+# data/devin2api/devin-2api.db。令牌仓为空时 /v1 对任何能连上的人开放，
+# 所以首次启动后先建令牌，再接 sub2api。
+
+server:
+  listen: ":8080"
+
+debug:
+  # 请求级调试记录是面板 usage / requests 页和排障的基础，保持开启。
+  enabled: true
+  # sub2api 多用户共享时只保留失败请求的正文，正常完成的请求完结即剥离
+  # payload（摘要行照常保留），避免把用户对话长期存在 devin2api 库里。
+  errors_only: true
+
+devin:
+  base_url: "https://server.codeium.com"
+  # 请求不带 model 时的缺省模型；可用模型以 /v1/models 返回为准。
+  model: "swe-2-max"
+  force_http1: true
+  # 发往上游的消息速率上限（条/分钟）。上游按分钟桶限流且把被拒尝试计入，
+  # 不限速时突发容易触顶。
+  max_rpm: 80
+
+dashboard:
+  # 面板密码，由 init 脚本生成；留空则面板无需登录。
+  password: ""

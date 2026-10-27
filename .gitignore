@@ -41,6 +41,9 @@ deploy/bootstrap.log
 # 品牌化配置可能含真实联系方式 / 域名，仅提交 branding.example.json
 deploy/branding.json
 
+# devin2api 配置含面板密码，仅提交 config.example.yaml
+deploy/devin2api/config.yaml
+
 # IDE
 .idea/
 .vscode/
