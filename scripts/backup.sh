@@ -5,6 +5,7 @@
 #   - postgres 全库 dump (custom format, 已压缩)
 #   - deploy/.env (含 JWT / TOTP 加密 key，丢了所有用户登录态失效)
 #   - deploy/data/sub2api/ (sub2api 自带数据目录)
+#   - devin2api 状态库 devin-2api.db（Devin 账号凭据、下游令牌）+ deploy/devin2api/config.yaml
 #
 # 不备份：
 #   - data/postgres/ (用 pg_dump 代替，跨版本更稳)
@@ -13,8 +14,21 @@
 # 用法：
 #   GPG_RECIPIENT=you@example.com ./scripts/backup.sh
 #   RCLONE_REMOTE=b2:manifold-backups GPG_RECIPIENT=you@example.com ./scripts/backup.sh
+#   ./scripts/backup.sh --no-upload     # 只留本地，不推异地
+#   ./scripts/backup.sh --no-encrypt    # 不加密，输出 root-only 的 .tar.gz，且不推异地（GPG 未配置时的临时手段）
 
 set -euo pipefail
+
+NO_ENCRYPT=0
+NO_UPLOAD=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-encrypt) NO_ENCRYPT=1; NO_UPLOAD=1 ;;
+    --no-upload)  NO_UPLOAD=1 ;;
+    -h|--help)    sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "未知参数: $arg" >&2; exit 2 ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -48,12 +62,20 @@ read_env_value() {
 # ─── 1. 前置检查 ──────────────────────────────────────────────────────
 log "前置检查..."
 command -v docker >/dev/null || die "需要 docker"
-command -v gpg    >/dev/null || die "需要 gpg"
 command -v tar    >/dev/null || die "需要 tar"
-[[ -n "$GPG_RECIPIENT" ]]    || die "未设置 GPG_RECIPIENT，参考 docs/backup-restore.md 创建 GPG key"
+if [[ "$NO_ENCRYPT" -eq 0 ]]; then
+  command -v gpg >/dev/null || die "需要 gpg"
+  [[ -n "$GPG_RECIPIENT" ]] || die "未设置 GPG_RECIPIENT，参考 docs/backup-restore.md 创建 GPG key（临时可用 --no-encrypt）"
+fi
+[[ "$NO_UPLOAD" -eq 1 ]] && RCLONE_REMOTE=""
 
 if [[ -n "$RCLONE_REMOTE" ]]; then
   command -v rclone >/dev/null || die "RCLONE_REMOTE 已设置但找不到 rclone"
+fi
+
+DEVIN_DB="${DEPLOY_DIR}/data/devin2api/devin-2api.db"
+if [[ -f "$DEVIN_DB" ]]; then
+  command -v python3 >/dev/null || die "备份 devin2api 需要 python3（用 SQLite 在线备份 API 取一致快照）"
 fi
 
 docker inspect -f '{{.State.Running}}' "$POSTGRES_CONTAINER" 2>/dev/null | grep -q true \
@@ -67,6 +89,7 @@ mkdir -p "$BACKUP_DIR"
 # ─── 2. 收集到临时工作目录 ────────────────────────────────────────────
 TIMESTAMP="$(date +%Y-%m-%dT%H-%M-%S)"
 ARCHIVE_NAME="manifold-${TIMESTAMP}.tar.gz.gpg"
+[[ "$NO_ENCRYPT" -eq 1 ]] && ARCHIVE_NAME="manifold-${TIMESTAMP}.tar.gz"
 WORK_DIR="$(mktemp -d -t manifold-backup-XXXXXX)"
 STAGE_DIR="${WORK_DIR}/stage"
 mkdir -p "$STAGE_DIR"
@@ -94,6 +117,24 @@ if [[ -d "${DEPLOY_DIR}/data/sub2api" ]]; then
   cp -r "${DEPLOY_DIR}/data/sub2api" "${STAGE_DIR}/data/sub2api"
 fi
 
+# devin2api：SQLite WAL 库在运行中直接 cp 可能拿到不一致的 db/-wal 组合，
+# 用 SQLite 在线备份 API 取快照（读期间不阻塞 devin2api 写入）
+if [[ -f "${DEPLOY_DIR}/devin2api/config.yaml" ]]; then
+  cp "${DEPLOY_DIR}/devin2api/config.yaml" "${STAGE_DIR}/configs/devin2api-config.yaml"
+fi
+if [[ -f "$DEVIN_DB" ]]; then
+  mkdir -p "${STAGE_DIR}/data/devin2api"
+  python3 - "$DEVIN_DB" "${STAGE_DIR}/data/devin2api/devin-2api.db" <<'PY'
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close()
+src.close()
+PY
+  log "  devin-2api.db 快照 = $(stat -c %s "${STAGE_DIR}/data/devin2api/devin-2api.db") 字节"
+fi
+
 # 留个版本指纹方便排错
 cat > "${STAGE_DIR}/MANIFEST.txt" <<EOF
 created_at: ${TIMESTAMP}
@@ -105,20 +146,25 @@ git_commit:         $(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unk
 EOF
 
 # ─── 3. 打 tar + gpg ──────────────────────────────────────────────────
-log "[3/4] tar + gpg..."
-TARBALL="${WORK_DIR}/${ARCHIVE_NAME%.gpg}"
-tar -czf "$TARBALL" -C "$STAGE_DIR" .
-
-# 多收件人：逗号分隔 → 多个 --recipient
-GPG_ARGS=()
-IFS=',' read -ra RECIPIENTS <<< "$GPG_RECIPIENT"
-for r in "${RECIPIENTS[@]}"; do
-  GPG_ARGS+=(--recipient "$(echo "$r" | xargs)")
-done
-
 FINAL_TMP="${BACKUP_DIR}/.${ARCHIVE_NAME}.tmp"
-gpg --batch --yes --trust-model always --encrypt "${GPG_ARGS[@]}" \
-    --output "$FINAL_TMP" "$TARBALL"
+if [[ "$NO_ENCRYPT" -eq 1 ]]; then
+  log "[3/4] tar（--no-encrypt：明文备份，仅 root 可读，不推异地）..."
+  ( umask 077 && tar -czf "$FINAL_TMP" -C "$STAGE_DIR" . )
+else
+  log "[3/4] tar + gpg..."
+  TARBALL="${WORK_DIR}/${ARCHIVE_NAME%.gpg}"
+  tar -czf "$TARBALL" -C "$STAGE_DIR" .
+
+  # 多收件人：逗号分隔 → 多个 --recipient
+  GPG_ARGS=()
+  IFS=',' read -ra RECIPIENTS <<< "$GPG_RECIPIENT"
+  for r in "${RECIPIENTS[@]}"; do
+    GPG_ARGS+=(--recipient "$(echo "$r" | xargs)")
+  done
+
+  gpg --batch --yes --trust-model always --encrypt "${GPG_ARGS[@]}" \
+      --output "$FINAL_TMP" "$TARBALL"
+fi
 
 FINAL_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
 mv "$FINAL_TMP" "$FINAL_PATH"
@@ -130,7 +176,7 @@ if [[ -n "$RCLONE_REMOTE" ]]; then
   log "[4/4] rclone copy → ${RCLONE_REMOTE}/"
   rclone copy "$FINAL_PATH" "$RCLONE_REMOTE/" --progress
 else
-  log "[4/4] RCLONE_REMOTE 未设置，跳过异地上传 (⚠ 仅本地备份不算异地)"
+  log "[4/4] 跳过异地上传 (⚠ 仅本地备份不算异地)"
 fi
 
 # 清旧本地

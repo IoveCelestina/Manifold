@@ -11,6 +11,7 @@
 #   ./scripts/restore.sh /path/to/manifold-2026-05-20T03-00-00.tar.gz.gpg
 #   RCLONE_REMOTE=b2:manifold-backups ./scripts/restore.sh manifold-2026-05-20T03-00-00.tar.gz.gpg
 #   ./scripts/restore.sh --force --yes /path/to/backup.tar.gz.gpg   # 覆盖现有数据
+#   ./scripts/restore.sh /path/to/manifold-...tar.gz                # backup.sh --no-encrypt 产出的明文包
 
 set -euo pipefail
 
@@ -50,22 +51,25 @@ trap cleanup EXIT
 
 # ─── 1. 准备备份文件 ──────────────────────────────────────────────────
 WORK_DIR="$(mktemp -d -t manifold-restore-XXXXXX)"
-ENCRYPTED="${WORK_DIR}/backup.tar.gz.gpg"
+ARCHIVE="${WORK_DIR}/backup.tar.gz.gpg"
+# backup.sh --no-encrypt 产出 .tar.gz，跳过解密
+PLAIN=0
+[[ "$BACKUP_ARG" == *.tar.gz ]] && { PLAIN=1; ARCHIVE="${WORK_DIR}/backup.tar.gz"; }
 
 if [[ -f "$BACKUP_ARG" ]]; then
-  cp "$BACKUP_ARG" "$ENCRYPTED"
+  cp "$BACKUP_ARG" "$ARCHIVE"
   log "使用本地文件 ${BACKUP_ARG}"
 elif [[ -n "$RCLONE_REMOTE" ]]; then
   command -v rclone >/dev/null || die "需要 rclone 才能从远端拉取"
   log "从 ${RCLONE_REMOTE}/${BACKUP_ARG} 拉取..."
-  rclone copyto "${RCLONE_REMOTE}/${BACKUP_ARG}" "$ENCRYPTED"
+  rclone copyto "${RCLONE_REMOTE}/${BACKUP_ARG}" "$ARCHIVE"
 else
   die "找不到 ${BACKUP_ARG}，且未设置 RCLONE_REMOTE"
 fi
 
 # ─── 2. 前置检查 ─────────────────────────────────────────────────────
 command -v docker >/dev/null || die "需要 docker"
-command -v gpg    >/dev/null || die "需要 gpg"
+[[ "$PLAIN" -eq 1 ]] || command -v gpg >/dev/null || die "需要 gpg"
 command -v tar    >/dev/null || die "需要 tar"
 [[ -f "$COMPOSE_FILE" ]]     || die "找不到 ${COMPOSE_FILE}"
 
@@ -97,7 +101,7 @@ fi
 log "解密 + 解包..."
 STAGE_DIR="${WORK_DIR}/stage"
 mkdir -p "$STAGE_DIR"
-gpg --batch --yes --decrypt --output "${WORK_DIR}/backup.tar.gz" "$ENCRYPTED"
+[[ "$PLAIN" -eq 1 ]] || gpg --batch --yes --decrypt --output "${WORK_DIR}/backup.tar.gz" "$ARCHIVE"
 tar -xzf "${WORK_DIR}/backup.tar.gz" -C "$STAGE_DIR"
 
 [[ -f "${STAGE_DIR}/MANIFEST.txt" ]]  || die "备份缺 MANIFEST.txt，可能损坏"
@@ -120,6 +124,16 @@ cp "${STAGE_DIR}/configs/.env" "${DEPLOY_DIR}/.env"
 if [[ -d "${STAGE_DIR}/data/sub2api" ]]; then
   mkdir -p "${DEPLOY_DIR}/data"
   cp -r "${STAGE_DIR}/data/sub2api" "${DEPLOY_DIR}/data/sub2api"
+fi
+
+# devin2api：快照是单个自洽的 db 文件（无 -wal/-shm），直接放回状态目录
+if [[ -f "${STAGE_DIR}/configs/devin2api-config.yaml" ]]; then
+  mkdir -p "${DEPLOY_DIR}/devin2api"
+  ( umask 077 && cp "${STAGE_DIR}/configs/devin2api-config.yaml" "${DEPLOY_DIR}/devin2api/config.yaml" )
+fi
+if [[ -d "${STAGE_DIR}/data/devin2api" ]]; then
+  mkdir -p "${DEPLOY_DIR}/data"
+  cp -r "${STAGE_DIR}/data/devin2api" "${DEPLOY_DIR}/data/devin2api"
 fi
 
 # ─── 6. 起 postgres + pg_restore ─────────────────────────────────────
@@ -147,7 +161,14 @@ docker exec -i "$POSTGRES_CONTAINER" \
 
 # ─── 7. 拉起其余服务 ────────────────────────────────────────────────
 log "拉起完整 compose 栈..."
-( cd "$DEPLOY_DIR" && docker compose up -d )
+SERVICES="$(cd "$DEPLOY_DIR" && docker compose config --services)"
+# 旧备份没有 devin2api 配置：单文件 bind mount 源不存在会被 docker 建成空目录，先跳过它
+if [[ ! -f "${DEPLOY_DIR}/devin2api/config.yaml" ]]; then
+  log "WARN: 没有 deploy/devin2api/config.yaml，跳过 devin2api；跑 scripts/init.sh 生成后再 docker compose up -d devin2api"
+  SERVICES="$(grep -vx devin2api <<<"$SERVICES")"
+fi
+# shellcheck disable=SC2086
+( cd "$DEPLOY_DIR" && docker compose up -d $SERVICES )
 
 log "等 sub2api 健康..."
 SUB2API_CONTAINER="manifold-sub2api"

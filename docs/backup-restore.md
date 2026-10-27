@@ -9,8 +9,12 @@ DoD：**另一台机器上，能用昨天的备份重建出能用的 sub2api**�
 | `postgres.dump` | sub2api 全库 | 全员数据没了 |
 | `configs/.env` | JWT/TOTP/postgres 密码 | 所有用户登录态 + 2FA 失效 |
 | `data/sub2api/` | sub2api 自带数据 | 不确定，安全起见包进来 |
+| `data/devin2api/devin-2api.db` | devin2api 状态库：Devin 账号凭据、下游令牌、请求日志 | 要在面板重新加 Devin 账号、建令牌，再把新令牌填回 sub2api 账号 |
+| `configs/devin2api-config.yaml` | devin2api 配置（含面板密码） | 重跑 `scripts/init.sh` 生成新密码 |
 
 **不备份**：`data/postgres/`（pg_dump 代替）、`data/redis/`（可重建）。
+
+devin2api 的库是 SQLite WAL 模式，运行中直接 `cp` 可能拿到 db 和 `-wal` 不一致的组合。`backup.sh` 用 python3 调 SQLite 在线备份 API 取快照，devin2api 不用停，所以服务器上需要有 `python3`。
 
 ## 一次性准备
 
@@ -87,6 +91,15 @@ RCLONE_REMOTE=b2:manifold-backups \
 ```
 
 输出最后一行是新备份的绝对路径，可以 capture 给上游脚本用。
+
+### 临时：GPG 还没配好时
+
+```bash
+./scripts/backup.sh --no-upload     # 照常加密，只是不推异地
+./scripts/backup.sh --no-encrypt    # 不加密，输出 backups/manifold-<时间>.tar.gz（权限 600），强制不推异地
+```
+
+`--no-encrypt` 的包里有 `.env`、JWT/TOTP 密钥和 Devin 凭据的明文，只能留在服务器本机。它不参与按天/按月的自动清理，用完手动删。`restore.sh` 看到 `.tar.gz` 后缀会跳过解密。
 
 ## 自动化调度
 

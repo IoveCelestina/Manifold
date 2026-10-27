@@ -3,7 +3,7 @@
 .SYNOPSIS
     Manifold 全量备份脚本（PowerShell 7+ 版，与 backup.sh 等价）。
 .DESCRIPTION
-    打包内容：postgres custom dump + .env + data/sub2api
+    打包内容：postgres custom dump + .env + data/sub2api + devin2api 状态库与配置
     输出单个 .tar.gz.gpg 加密包，可选 rclone 推异地。
 .PARAMETER GpgRecipient
     必填，GPG 收件人。多个用逗号分隔。
@@ -85,6 +85,13 @@ if ($RcloneRemote -and -not (Get-Command rclone -ErrorAction SilentlyContinue)) 
 $running = (docker inspect -f '{{.State.Running}}' $PostgresContainer 2>$null)
 if ($running -ne 'true') { Die "postgres 容器 ($PostgresContainer) 未运行" }
 
+$devinDb = Join-Path $DeployDir 'data\devin2api\devin-2api.db'
+$python = $null
+if (Test-Path -LiteralPath $devinDb) {
+    $python = (Get-Command python3, python -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $python) { Die "备份 devin2api 需要 python（用 SQLite 在线备份 API 取一致快照）" }
+}
+
 $pgUser = Read-DotEnvValue (Join-Path $DeployDir '.env') 'POSTGRES_USER'; if (-not $pgUser) { $pgUser = 'sub2api' }
 $pgDb   = Read-DotEnvValue (Join-Path $DeployDir '.env') 'POSTGRES_DB'  ; if (-not $pgDb)   { $pgDb   = 'sub2api' }
 
@@ -122,6 +129,20 @@ try {
         $dataDir = Join-Path $stageDir 'data'
         New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
         Copy-Item -LiteralPath $sub2apiData -Destination (Join-Path $dataDir 'sub2api') -Recurse
+    }
+
+    # devin2api：SQLite WAL 库运行中直接复制可能不一致，用在线备份 API 取快照
+    $devinConfig = Join-Path $DeployDir 'devin2api\config.yaml'
+    if (Test-Path -LiteralPath $devinConfig) {
+        Copy-Item -LiteralPath $devinConfig -Destination (Join-Path $cfgRoot 'devin2api-config.yaml')
+    }
+    if ($python) {
+        $devinStage = Join-Path $stageDir 'data\devin2api'
+        New-Item -ItemType Directory -Path $devinStage -Force | Out-Null
+        $snapshot = 'import sqlite3, sys; s = sqlite3.connect(sys.argv[1]); d = sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()'
+        & $python -c $snapshot $devinDb (Join-Path $devinStage 'devin-2api.db')
+        if ($LASTEXITCODE -ne 0) { Die "devin-2api.db 快照失败 ($LASTEXITCODE)" }
+        Write-Log "  devin-2api.db 快照 = $((Get-Item (Join-Path $devinStage 'devin-2api.db')).Length) 字节"
     }
 
     $gitCommit = try { (git -C $RootDir rev-parse HEAD 2>$null).Trim() } catch { 'unknown' }

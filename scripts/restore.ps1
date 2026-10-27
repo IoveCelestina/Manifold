@@ -6,6 +6,7 @@
     默认全新机器模式：发现已有数据就拒绝继续。-Force 强制覆盖，-Yes 跳过确认。
 .PARAMETER BackupPath
     本地 .tar.gz.gpg 文件路径，或当 -RcloneRemote 设置时为远端文件名。
+    backup.sh --no-encrypt 产出的 .tar.gz 明文包同样可用（跳过解密）。
 .PARAMETER RcloneRemote
     可选，当 BackupPath 不是本地文件时从这里拉取。
 .PARAMETER Force
@@ -81,22 +82,25 @@ $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("manifold-restore-" + [G
 New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 
 try {
-    $encrypted = Join-Path $workDir 'backup.tar.gz.gpg'
+    $plain   = $BackupPath.EndsWith('.tar.gz')
+    $tarball = Join-Path $workDir 'backup.tar.gz'
+    $archive = if ($plain) { $tarball } else { Join-Path $workDir 'backup.tar.gz.gpg' }
 
     if (Test-Path -LiteralPath $BackupPath -PathType Leaf) {
-        Copy-Item -LiteralPath $BackupPath -Destination $encrypted
+        Copy-Item -LiteralPath $BackupPath -Destination $archive
         Write-Log "使用本地文件 $BackupPath"
     } elseif ($RcloneRemote) {
         if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { Die "需要 rclone 才能从远端拉取" }
         Write-Log "从 $RcloneRemote/$BackupPath 拉取..."
-        & rclone copyto "$RcloneRemote/$BackupPath" $encrypted
+        & rclone copyto "$RcloneRemote/$BackupPath" $archive
         if ($LASTEXITCODE -ne 0) { Die "rclone copyto 失败" }
     } else {
         Die "找不到 $BackupPath，且未设置 -RcloneRemote"
     }
 
     # ─── 2. 前置检查 ─────────────────────────────────────────────────
-    foreach ($cmd in 'docker', 'gpg', 'tar') {
+    $required = if ($plain) { 'docker', 'tar' } else { 'docker', 'gpg', 'tar' }
+    foreach ($cmd in $required) {
         if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "需要 $cmd" }
     }
     if (-not (Test-Path $ComposeFile)) { Die "找不到 $ComposeFile" }
@@ -125,12 +129,13 @@ try {
 
     # ─── 3. 解密 + 解包 ──────────────────────────────────────────────
     Write-Log "解密 + 解包..."
-    $tarball  = Join-Path $workDir 'backup.tar.gz'
     $stageDir = Join-Path $workDir 'stage'
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-    & gpg --batch --yes --decrypt --output $tarball $encrypted
-    if ($LASTEXITCODE -ne 0) { Die "gpg 解密失败" }
+    if (-not $plain) {
+        & gpg --batch --yes --decrypt --output $tarball $archive
+        if ($LASTEXITCODE -ne 0) { Die "gpg 解密失败" }
+    }
     & tar -xzf $tarball -C $stageDir
     if ($LASTEXITCODE -ne 0) { Die "tar 解包失败" }
 
@@ -157,6 +162,18 @@ try {
     if (Test-Path $stageSub2api) {
         New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
         Copy-Item -LiteralPath $stageSub2api -Destination (Join-Path $DeployDir 'data\sub2api') -Recurse
+    }
+
+    # devin2api：快照是单个自洽的 db 文件（无 -wal/-shm），直接放回状态目录
+    $stageDevinConfig = Join-Path $stageDir 'configs\devin2api-config.yaml'
+    if (Test-Path -LiteralPath $stageDevinConfig) {
+        New-Item -ItemType Directory -Path (Join-Path $DeployDir 'devin2api') -Force | Out-Null
+        Copy-Item -LiteralPath $stageDevinConfig -Destination (Join-Path $DeployDir 'devin2api\config.yaml') -Force
+    }
+    $stageDevin = Join-Path $stageDir 'data\devin2api'
+    if (Test-Path $stageDevin) {
+        New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
+        Copy-Item -LiteralPath $stageDevin -Destination (Join-Path $DeployDir 'data\devin2api') -Recurse
     }
     # ─── 6. 起 postgres + pg_restore ─────────────────────────────────
     Write-Log "拉起 postgres..."
@@ -186,7 +203,15 @@ try {
     # ─── 7. 拉起其余服务 ─────────────────────────────────────────────
     Write-Log "拉起完整 compose 栈..."
     Push-Location $DeployDir
-    try { & docker compose up -d } finally { Pop-Location }
+    try {
+        $services = @(& docker compose config --services)
+        # 旧备份没有 devin2api 配置：单文件 bind mount 源不存在会被 docker 建成空目录，先跳过它
+        if (-not (Test-Path -LiteralPath (Join-Path $DeployDir 'devin2api\config.yaml'))) {
+            Write-Log "WARN: 没有 deploy\devin2api\config.yaml，跳过 devin2api；跑 scripts\init.ps1 生成后再 docker compose up -d devin2api"
+            $services = $services | Where-Object { $_ -ne 'devin2api' }
+        }
+        & docker compose up -d @services
+    } finally { Pop-Location }
 
     Write-Log "等 sub2api 健康..."
     $state = 'starting'
