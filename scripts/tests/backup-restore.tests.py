@@ -34,7 +34,11 @@ class FixtureTool {
         string tool = Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location);
         if (tool == "docker" && !String.Equals(
             Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-            Environment.GetEnvironmentVariable("TEST_DOCKER_BIN"), StringComparison.OrdinalIgnoreCase)) return 95;
+            Environment.GetEnvironmentVariable("TEST_DOCKER_BIN"), StringComparison.OrdinalIgnoreCase)) {
+            Console.Error.WriteLine("Unexpected fixture executable: " + Assembly.GetExecutingAssembly().Location);
+            Console.Error.WriteLine("Expected fixture directory: " + Environment.GetEnvironmentVariable("TEST_DOCKER_BIN"));
+            return 95;
+        }
         if (tool == "gpg") {
             int output = Array.IndexOf(args, "--output");
             if (output < 0) return 90;
@@ -93,7 +97,9 @@ class BackupRestoreTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.shared = tempfile.TemporaryDirectory(prefix="manifold-test-tools-")
-        cls.bin = Path(cls.shared.name)
+        # Hosted Windows runners may expose TEMP through an 8.3 short name;
+        # .NET expands executable paths, so compare canonical directory names.
+        cls.bin = Path(cls.shared.name).resolve()
         if OPTIONS.backend == "powershell":
             if os.name != "nt":
                 raise unittest.SkipTest("The native PowerShell fixture requires Windows")
