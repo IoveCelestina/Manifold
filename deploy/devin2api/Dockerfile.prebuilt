@@ -1,0 +1,8 @@
+# Package a tested CGO_ENABLED=0 GOOS=linux binary built on a separate machine.
+# Use a temporary context containing only this Dockerfile and devin-2api.
+FROM ghcr.io/wncfht/devin2api@sha256:ae8db9975e7ef445b14950f80a70ed153e31eeef4dc9c54505881126e8dc66c7
+ARG BINARY_SHA256
+COPY --chmod=0755 devin-2api /app/devin-2api
+RUN test -n "$BINARY_SHA256" \
+    && printf '%s  /app/devin-2api\n' "$BINARY_SHA256" | sha256sum -c - \
+    && /app/devin-2api -version

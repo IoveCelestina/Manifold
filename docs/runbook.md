@@ -328,6 +328,8 @@ docker logs manifold-<service> --tail 100
 
 devin2api 把 Devin 账号的模型转成 Anthropic Messages / OpenAI Responses / Chat 协议。在 Manifold 里它是 sub2api 的一个上游：sub2api 负责用户、分组、计费，devin2api 只负责协议转换和 Devin 侧的限流。
 
+客户端可以保持固定模型名，通过 effort 参数选择模型档位，配置和协议限制见[客户端思考强度](devin2api-reasoning.md)。
+
 **影响范围**：新增 `manifold-devin2api` 容器，不重启 sub2api / caddy。只有绑定到 Devin 分组的 sub2api 用户会走它。
 
 **准备**：

@@ -1,0 +1,371 @@
+--- a/internal/llm/request.go
++++ b/internal/llm/request.go
+@@ -46,6 +46,8 @@
+ type RequestMessages struct {
+ 	// Model 是调用方指定的模型标识；空表示由适配器使用默认配置。
+ 	Model string
++	// ReasoningEffort selects a catalog-backed effort variant of Model; empty keeps the requested model.
++	ReasoningEffort string
+ 	// SystemPrompt 是独立于普通消息历史的系统提示词。
+ 	SystemPrompt string
+ 	// Messages 是按时间顺序排列、可跨供应商重放的完整对话历史。
+--- a/internal/api/anthropic/messages/request.go
++++ b/internal/api/anthropic/messages/request.go
+@@ -29,6 +29,9 @@
+ 	TopK          *int            `json:"top_k,omitempty"`
+ 	StopSequences []string        `json:"stop_sequences,omitempty"`
+ 	Metadata      json.RawMessage `json:"metadata,omitempty"`
++	OutputConfig  struct {
++		Effort string `json:"effort,omitempty"`
++	} `json:"output_config,omitempty"`
+ }
+ 
+ // Message 是 Anthropic 消息条目。
+@@ -71,6 +74,7 @@
+ 	"model": true, "messages": true, "system": true, "max_tokens": true,
+ 	"tools": true, "tool_choice": true, "stream": true, "temperature": true,
+ 	"top_p": true, "top_k": true, "stop_sequences": true, "metadata": true,
++	"output_config": true,
+ }
+ 
+ // AdaptedRequest 是 Anthropic 请求转换后的中间请求和生成选项。
+@@ -103,7 +107,7 @@
+ 		return AdaptedRequest{}, errors.New("anthropic request messages are required")
+ 	}
+ 
+-	context := llm.RequestMessages{Model: request.Model}
++	context := llm.RequestMessages{Model: request.Model, ReasoningEffort: request.OutputConfig.Effort}
+ 	if collectDropped {
+ 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, anthropicRequestFields)...)
+ 	}
+--- a/internal/api/openai/chat/request.go
++++ b/internal/api/openai/chat/request.go
+@@ -35,6 +35,7 @@
+ 	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
+ 	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+ 	N                   *int            `json:"n,omitempty"`
++	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+ }
+ 
+ // Message 是 Chat Completions 消息条目。
+@@ -89,7 +90,7 @@
+ }
+ 
+ // chatRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
+-// （reasoning_effort/store/service_tier/metadata/response_format 等）
++// （store/service_tier/metadata/response_format 等）
+ // 上游没有对应物，记入 Dropped 透出而不是静默吞掉。
+ var chatRequestFields = map[string]bool{
+ 	"model": true, "messages": true, "tools": true, "tool_choice": true,
+@@ -98,6 +99,7 @@
+ 	"max_completion_tokens": true, "temperature": true, "top_p": true,
+ 	"stop": true, "top_k": true, "seed": true, "user": true,
+ 	"prompt_cache_key": true, "parallel_tool_calls": true, "n": true,
++	"reasoning_effort": true,
+ }
+ 
+ // AdaptedRequest 是 Chat 请求转换后的中间请求和生成选项。
+@@ -131,7 +133,7 @@
+ 		return AdaptedRequest{}, errors.New("chat request messages are required")
+ 	}
+ 
+-	context := llm.RequestMessages{Model: request.Model}
++	context := llm.RequestMessages{Model: request.Model, ReasoningEffort: request.ReasoningEffort}
+ 	if collectDropped {
+ 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
+ 	}
+--- a/internal/api/openai/chat/request_test.go
++++ b/internal/api/openai/chat/request_test.go
+@@ -211,7 +211,10 @@
+ 		t.Fatal(err)
+ 	}
+ 	droppedOn := fmt.Sprint(withScan.Context.Dropped)
+-	for _, want := range []string{"field:store", "field:reasoning_effort"} {
++	if withScan.Context.ReasoningEffort != "high" || withoutScan.Context.ReasoningEffort != "high" {
++		t.Fatal("reasoning effort must be decoded with debug logging both on and off")
++	}
++	for _, want := range []string{"field:store"} {
+ 		if !strings.Contains(droppedOn, want) {
+ 			t.Fatalf("collectDropped=true dropped = %v, want %s", withScan.Context.Dropped, want)
+ 		}
+--- a/internal/api/openai/responses/request.go
++++ b/internal/api/openai/responses/request.go
+@@ -18,7 +18,10 @@
+ // Request 是 OpenAI Responses 请求中本适配器支持的字段集合。
+ type Request struct {
+ 	// Model 是请求使用的模型标识。
+-	Model string `json:"model"`
++	Model     string `json:"model"`
++	Reasoning struct {
++		Effort string `json:"effort,omitempty"`
++	} `json:"reasoning,omitempty"`
+ 	// Instructions 是独立于 input 的系统提示词。
+ 	Instructions string `json:"instructions,omitempty"`
+ 	// Input 是字符串或 Responses input item 数组。
+@@ -49,7 +52,7 @@
+ }
+ 
+ // responsesRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
+-// （reasoning/store/service_tier/include 等）上游没有对应物，
++// （store/service_tier/include 等）上游没有对应物，
+ // 记入 Dropped 透出而不是静默吞掉。previous_response_id 虽被消费
+ // 用于显式拒绝，标记为已读避免空值也落进 dropped。
+ var responsesRequestFields = map[string]bool{
+@@ -58,6 +61,7 @@
+ 	"top_p": true, "user": true, "prompt_cache_key": true,
+ 	"tool_choice": true, "parallel_tool_calls": true,
+ 	"previous_response_id": true,
++	"reasoning":            true,
+ }
+ 
+ // Tool 是 OpenAI Responses 工具定义；type 支持 function、custom（freeform）、
+@@ -132,7 +136,7 @@
+ 		return AdaptedRequest{}, errors.New("responses request model is required")
+ 	}
+ 
+-	context := llm.RequestMessages{Model: request.Model, SystemPrompt: request.Instructions}
++	context := llm.RequestMessages{Model: request.Model, ReasoningEffort: request.Reasoning.Effort, SystemPrompt: request.Instructions}
+ 	if collectDropped {
+ 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, responsesRequestFields)...)
+ 	}
+--- a/internal/adapter/devin/devin.go
++++ b/internal/adapter/devin/devin.go
+@@ -734,6 +734,12 @@
+ 	catalogAt := time.Now()
+ 	adapter.ensureCatalog(ctx)
+ 	recorder.NoteModelsFetchMS(time.Since(catalogAt).Milliseconds())
++	// Resolve effort before routing, cache identity, capability checks and wire encoding.
++	model, err := adapter.resolveReasoningEffort(model, request.ReasoningEffort)
++	if err != nil {
++		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
++		return nil, err
++	}
+ 	// requestedUID 记下路由判定前的 uid：命中 router 时保温条目要用它
+ 	// 重建 assignment jwt（绑 cascade_id），否则 ping 重放丢绑定。
+ 	requestedUID := model
+--- /dev/null
++++ b/internal/adapter/devin/reasoning_effort.go
+@@ -0,0 +1,55 @@
++package devin
++
++import (
++	"fmt"
++	"regexp"
++	"slices"
++	"strings"
++
++	"github.com/WncFht/devin2api/internal/llm"
++)
++
++// The effort component belongs to the upstream UID. Preserve service variants
++// (such as -fast, -priority and -lightning) when switching effort.
++var effortModelPattern = regexp.MustCompile(`^(.*)-(none|minimal|low|medium|high|xhigh|max|ultra)(-[a-z0-9-]+)?$`)
++
++// resolveReasoningEffort selects an exact same-family variant from the loaded
++// catalog. Explicit effort overrides a suffix supplied by the client or an alias.
++// It never guesses unsupported variants or silently downgrades the requested effort.
++func (adapter *Adapter) resolveReasoningEffort(model, effort string) (string, error) {
++	if effort == "" {
++		return model, nil
++	}
++	adapter.modelsMu.RLock()
++	defer adapter.modelsMu.RUnlock()
++	if len(adapter.models) == 0 {
++		return "", &llm.Failure{Code: "unavailable", Message: "model catalog unavailable; cannot resolve reasoning effort"}
++	}
++	family := model
++	if parts := effortModelPattern.FindStringSubmatch(model); parts != nil {
++		family = parts[1] + parts[3]
++		// A family name can itself end in an effort word (nemotron-3-ultra).
++		// Prefer an exact catalog family over interpreting that word as a suffix.
++		for _, candidate := range adapter.models {
++			candidateParts := effortModelPattern.FindStringSubmatch(candidate.ID)
++			if candidateParts != nil && candidateParts[1]+candidateParts[3] == model {
++				family = model
++				break
++			}
++		}
++	}
++	var supported []string
++	for _, candidate := range adapter.models {
++		parts := effortModelPattern.FindStringSubmatch(candidate.ID)
++		if parts == nil || parts[1]+parts[3] != family {
++			continue
++		}
++		if parts[2] == effort {
++			return candidate.ID, nil
++		}
++		supported = append(supported, parts[2])
++	}
++	slices.Sort(supported)
++	return "", &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf(
++		"model %q does not support reasoning effort %q; supported efforts: [%s]", model, effort, strings.Join(supported, ", "))}
++}
+--- /dev/null
++++ b/internal/adapter/devin/reasoning_effort_test.go
+@@ -0,0 +1,165 @@
++package devin
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	devinproto "local/devinproto"
++
++	"connectrpc.com/connect"
++
++	"github.com/WncFht/devin2api/internal/adapter"
++	"github.com/WncFht/devin2api/internal/api/anthropic/messages"
++	"github.com/WncFht/devin2api/internal/api/openai/chat"
++	"github.com/WncFht/devin2api/internal/api/openai/responses"
++	"github.com/WncFht/devin2api/internal/llm"
++)
++
++// TestResolveReasoningEffort covers aliases, explicit suffixes and service tiers
++// without accepting a fabricated model or crossing model families.
++func TestResolveReasoningEffort(t *testing.T) {
++	a := &Adapter{models: []adapter.ModelInfo{
++		{ID: "claude-opus-5-5-low"}, {ID: "claude-opus-5-5-medium"},
++		{ID: "claude-opus-5-5-high"}, {ID: "claude-opus-5-5-max"},
++		{ID: "claude-opus-5-5-low-fast"}, {ID: "claude-opus-5-5-high-fast"},
++		{ID: "gpt-6-sol-none-priority"}, {ID: "gpt-6-sol-high-priority"},
++		{ID: "swe-2-high-lightning"}, {ID: "swe-2-max-lightning"},
++		{ID: "gemini-4-argon-low"}, {ID: "gemini-4-argon-high"},
++		{ID: "nemotron-3-ultra-low"}, {ID: "nemotron-3-ultra-high"},
++	}}
++	for _, tc := range []struct{ model, effort, want, errorCode string }{
++		{"claude-opus-5-5", "high", "claude-opus-5-5-high", ""},
++		{"claude-opus-5-5-medium", "max", "claude-opus-5-5-max", ""},
++		{"claude-opus-5-5-high", "low", "claude-opus-5-5-low", ""},
++		{"claude-opus-5-5-high", "", "claude-opus-5-5-high", ""},
++		{"claude-opus-5-5-fast", "high", "claude-opus-5-5-high-fast", ""},
++		{"claude-opus-5-5-low-fast", "high", "claude-opus-5-5-high-fast", ""},
++		{"gpt-6-sol-high-priority", "none", "gpt-6-sol-none-priority", ""},
++		{"swe-2-high-lightning", "max", "swe-2-max-lightning", ""},
++		{"nemotron-3-ultra", "high", "nemotron-3-ultra-high", ""},
++		{"nemotron-3-ultra-high", "low", "nemotron-3-ultra-low", ""},
++		{"claude-opus-5-5", "none", "", "invalid_argument"},
++		{"claude-opus-5-5-low-fast", "max", "", "invalid_argument"},
++		{"gemini-4-argon-low", "max", "", "invalid_argument"},
++		{"missing-model", "high", "", "invalid_argument"},
++		{"claude-opus-5-5", "typo", "", "invalid_argument"},
++	} {
++		t.Run(tc.model+"/"+tc.effort, func(t *testing.T) {
++			got, err := a.resolveReasoningEffort(tc.model, tc.effort)
++			if tc.errorCode != "" {
++				if err == nil || llm.Classify(err).Code != tc.errorCode || !strings.Contains(err.Error(), "supported efforts:") {
++					t.Fatalf("got %q, %v; want %s with supported efforts", got, err, tc.errorCode)
++				}
++				return
++			}
++			if err != nil || got != tc.want {
++				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
++			}
++		})
++	}
++	if _, err := (&Adapter{}).resolveReasoningEffort("model", "high"); err == nil || llm.Classify(err).Code != "unavailable" {
++		t.Fatalf("empty catalog error = %v", err)
++	}
++	if got, err := (&Adapter{}).resolveReasoningEffort("unchanged", ""); err != nil || got != "unchanged" {
++		t.Fatalf("request without effort changed: %q, %v", got, err)
++	}
++}
++
++// TestClientReasoningEffort checks all three public JSON contracts and confirms
++// that non-string values fail decoding instead of silently selecting a default.
++func TestClientReasoningEffort(t *testing.T) {
++	for _, tc := range []struct {
++		name, body, field string
++		decode            func([]byte) (llm.RequestMessages, error)
++	}{
++		{"messages", `{"model":"claude-opus-5-5-medium","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":VALUE}}`, "output_config", func(body []byte) (llm.RequestMessages, error) {
++			decoded, err := messages.DecodeRequest(body, true)
++			return decoded.Context, err
++		}},
++		{"responses", `{"model":"gpt-6-sol-medium","input":"hi","reasoning":{"effort":VALUE}}`, "reasoning", func(body []byte) (llm.RequestMessages, error) {
++			decoded, err := responses.DecodeRequest(body, true)
++			return decoded.Context, err
++		}},
++		{"chat", `{"model":"gpt-6-sol-medium","messages":[{"role":"user","content":"hi"}],"reasoning_effort":VALUE}`, "reasoning_effort", func(body []byte) (llm.RequestMessages, error) {
++			decoded, err := chat.DecodeRequest(body, true)
++			return decoded.Context, err
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			for _, value := range []string{`"high"`, `null`, `42`} {
++				decoded, err := tc.decode([]byte(strings.Replace(tc.body, "VALUE", value, 1)))
++				if value == "42" {
++					if err == nil {
++						t.Fatal("non-string effort accepted")
++					}
++					continue
++				}
++				want := "high"
++				if value == "null" {
++					want = ""
++				}
++				if err != nil || decoded.ReasoningEffort != want {
++					t.Fatalf("effort = %q, %v; want %q", decoded.ReasoningEffort, err, want)
++				}
++				for _, dropped := range decoded.Dropped {
++					if dropped == "field:"+tc.field {
++						t.Fatalf("consumed effort reported as dropped: %v", decoded.Dropped)
++					}
++				}
++			}
++		})
++	}
++}
++
++// TestEffortCacheIsolation prevents replaying a completion from another effort.
++func TestEffortCacheIsolation(t *testing.T) {
++	request := llm.RequestMessages{Model: "claude-opus-5-5-medium"}
++	if detachedRequestKey(request, "claude-opus-5-5-low") == detachedRequestKey(request, "claude-opus-5-5-high") {
++		t.Fatal("different resolved effort models shared a completion cache key")
++	}
++}
++
++// TestReasoningEffortWire verifies the real Stream path after alias resolution,
++// including rejection before the chat RPC when the requested variant is absent.
++func TestReasoningEffortWire(t *testing.T) {
++	stub := &stubUpstream{
++		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{
++			stubModelEntry("claude-opus-5-5-medium", false),
++			stubModelEntry("claude-opus-5-5-high", false),
++		},
++		chat: func(_ int, _ *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
++			return stubSend(stream, stubMeta(), stubDelta("OK"), stubStop())
++		},
++	}
++	server := stubServer(t, stub, nil)
++	a := stubAdapter(t, server, Config{Model: "public-model", Identity: LaneIdentity{Token: "test"}, Aliases: map[string]string{"public-model": "claude-opus-5-5-medium"}})
++	for _, effort := range []string{"high", ""} {
++		request := stubRequest()
++		request.Model = "public-model"
++		request.ReasoningEffort = effort
++		stream, err := a.Stream(context.Background(), request)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := stubDeltas(t, stubDrain(t, stream)); got != "OK" {
++			t.Fatalf("response = %q", got)
++		}
++		want := "claude-opus-5-5-medium"
++		if effort != "" {
++			want = "claude-opus-5-5-high"
++		}
++		if got := stub.requests[len(stub.requests)-1].GetChatModelUid(); got != want {
++			t.Fatalf("wire model = %q; want %q", got, want)
++		}
++	}
++	request := stubRequest()
++	request.Model = "public-model"
++	request.ReasoningEffort = "max"
++	if _, err := a.Stream(context.Background(), request); err == nil {
++		t.Fatal("unsupported effort accepted")
++	}
++	if stub.chatCalls.Load() != 2 {
++		t.Fatalf("unsupported effort reached upstream: %d chat calls", stub.chatCalls.Load())
++	}
++}

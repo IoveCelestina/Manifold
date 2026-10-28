@@ -191,7 +191,9 @@ docker compose up -d kuma
 
 **影响范围**：经 devin2api 的 sub2api 分组短暂不可用。停止时进程最多排空 600s 等在途流跑完（compose 给了 660s 宽限），之后重启约数秒。容器里面板的「一键更新」不可用（返回 501），只能换镜像。
 
-**镜像结构**：官方 GHCR 0.18.0 镜像里的二进制缺执行位，不能直接用。`deploy/devin2api/Dockerfile` 以官方镜像（按 digest 钉死）为基础只补 `chmod`，compose 用本地构建出的 `manifold/devin2api:<版本>`。上游修好以后可以改回直接用官方镜像。
+**镜像结构**：`deploy/devin2api/Dockerfile` 固定上游 v0.18.0 源码提交与归档校验和，应用 `reasoning-effort.patch` 并测试、构建，再把可执行文件放进固定 digest 的官方运行时镜像。compose 使用 `manifold/devin2api:0.18.0-effort.1`。升级上游时需要重新验证补丁和测试；直接切回官方镜像会失去[客户端思考强度映射](devin2api-reasoning.md)。
+
+**构建位置**：源码编译在本机或内存充足的构建机完成，不要在 4 GB 生产服务器上执行 `docker compose build devin2api`。可将构建好的镜像通过 `docker save` / `docker load` 传到生产机，或按[预编译二进制打包说明](devin2api-reasoning.md#构建与回滚)仅在生产机打包镜像。
 
 **准备**：
 - 读 [release notes](https://github.com/WncFht/devin2api/releases)。新版启动时会对 `devin-2api.db` 跑 schema 迁移，旧版不一定能读迁移后的库。
@@ -203,13 +205,20 @@ docker compose up -d kuma
 **步骤**：
 
 ```bash
-$EDITOR deploy/devin2api/Dockerfile   # 换 FROM 的 digest 和注释里的版本
+$EDITOR deploy/devin2api/Dockerfile   # 更新源码提交、归档校验和、镜像 digest 和构建版本
+# 同步适配 reasoning-effort.patch；构建会运行协议和模型路由测试
 $EDITOR deploy/docker-compose.yml     # devin2api 的 image tag 和注释改成新版本
-cd deploy && docker compose build devin2api   # 构建时会跑一次 -version，二进制起不来这里就失败
+cd deploy && docker compose build devin2api   # 仅在构建机执行；测试和 -version 校验通过后传输镜像
+```
+
+确认新镜像已载入生产机，并同步相应 compose 镜像标记后，在生产机执行：
+
+```bash
+cd /opt/manifold/deploy
 # 先停再备份：进程退出后 db 与 -wal/-shm 是一致的
 docker compose stop devin2api
 cp -a data/devin2api "data/devin2api.bak-$(date +%Y%m%d)"
-docker compose up -d devin2api
+docker compose up -d --no-build --no-deps devin2api
 ```
 
 **验证**：

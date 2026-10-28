@@ -129,11 +129,11 @@ services:
   # 首次启动前先跑 scripts/init.sh 生成 ./devin2api/config.yaml（含面板密码）。
   # 上线、接入、升级步骤见 docs/runbook.md「devin2api 上线与接入 sub2api」。
   devin2api:
-    # 官方镜像（digest 钉在 ./devin2api/Dockerfile）二进制缺执行位，本地补一层再用
+    # 固定上游源码和镜像，加入按客户端 effort 选择模型档位的构建
     build:
       context: ./devin2api
-    # devin2api 0.18.0 (pulled 2026-10-27)
-    image: manifold/devin2api:0.18.0
+    # devin2api 0.18.0 + Manifold reasoning effort routing
+    image: manifold/devin2api:0.18.0-effort.1
     container_name: manifold-devin2api
     restart: unless-stopped
     # 收到 SIGTERM 后进程最多排空 600s 让在途流跑完；不放宽的话 docker 10s 就强杀。
