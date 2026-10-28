@@ -54,6 +54,19 @@ function Read-DotEnvValue {
     return $null
 }
 
+function Resolve-DataRoot {
+    $configured = $env:MANIFOLD_DATA_DIR
+    if (-not $configured) {
+        $configured = Read-DotEnvValue (Join-Path $DeployDir '.env') 'MANIFOLD_DATA_DIR'
+    }
+    if (-not $configured) { $configured = './data' }
+
+    if ([System.IO.Path]::IsPathRooted($configured)) {
+        return [System.IO.Path]::GetFullPath($configured)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $DeployDir $configured))
+}
+
 # 二进制安全：把 native 进程 stdout 流式写到文件
 function Invoke-NativeToFile {
     param([string]$Exe, [string[]]$Arguments, [string]$OutFile)
@@ -85,7 +98,8 @@ if ($RcloneRemote -and -not (Get-Command rclone -ErrorAction SilentlyContinue)) 
 $running = (docker inspect -f '{{.State.Running}}' $PostgresContainer 2>$null)
 if ($running -ne 'true') { Die "postgres 容器 ($PostgresContainer) 未运行" }
 
-$devinDb = Join-Path $DeployDir 'data\devin2api\devin-2api.db'
+$dataRoot = Resolve-DataRoot
+$devinDb = Join-Path $dataRoot 'devin2api\devin-2api.db'
 $python = $null
 if (Test-Path -LiteralPath $devinDb) {
     $python = (Get-Command python3, python -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -124,7 +138,7 @@ try {
     New-Item -ItemType Directory -Path $cfgRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $DeployDir '.env') -Destination (Join-Path $cfgRoot '.env')
 
-    $sub2apiData = Join-Path $DeployDir 'data\sub2api'
+    $sub2apiData = Join-Path $dataRoot 'sub2api'
     if (Test-Path $sub2apiData) {
         $dataDir = Join-Path $stageDir 'data'
         New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
@@ -152,6 +166,7 @@ hostname:   $([System.Net.Dns]::GetHostName())
 postgres_container: $PostgresContainer
 postgres_user:      $pgUser
 postgres_db:        $pgDb
+data_root:          $dataRoot
 git_commit:         $gitCommit
 "@
     Set-Content -LiteralPath (Join-Path $stageDir 'MANIFEST.txt') -Value $manifest -Encoding utf8NoBOM

@@ -3,7 +3,7 @@
 # 设计原则：
 #   - sub2api / devin2api 用固定 digest 镜像（升级流程见 docs/upgrade.md）
 #   - chat-demo 从 ../chat-demo 本地构建（聊天 + 生图）
-#   - 所有持久化数据集中在 ./data/ 下，便于备份和迁移
+#   - 持久化数据根目录由 MANIFOLD_DATA_DIR 控制；默认 ./data 兼容现有部署
 #
 # 启动：
 #   cd deploy
@@ -28,7 +28,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sub2api}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/postgres
+        target: /var/lib/postgresql/data
     networks:
       - manifold-data
     healthcheck:
@@ -46,7 +48,9 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     command: ["redis-server", "--maxclients", "50000", "--appendonly", "yes"]
     volumes:
-      - ./data/redis:/data
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/redis
+        target: /data
     networks:
       - manifold-data
     healthcheck:
@@ -57,7 +61,7 @@ services:
 
   # ─── 前台网关：sub2api（后续替换为 Manifold 重构镜像） ──────
   sub2api:
-    # sub2api 0.2.18 (pulled 2026-10-26)
+    # sub2api 0.2.18 (security update 2026-10-26)
     image: weishaw/sub2api@sha256:468a0b0e541e4becc05f1cf57826159235ea27a49a09f3dc2da6a43fcc05a22d
     container_name: manifold-sub2api
     restart: unless-stopped
@@ -109,7 +113,9 @@ services:
     # 如需临时本机调试 sub2api 后台，临时反注释下面这行：
     #   ports: ["127.0.0.1:8080:8080"]
     volumes:
-      - ./data/sub2api:/app/data
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/sub2api
+        target: /app/data
     networks:
       - manifold-data       # 用于触达 postgres / redis
       - manifold-upstream   # 用于出网调厂商 API
@@ -149,7 +155,9 @@ services:
     volumes:
       - ./devin2api/config.yaml:/app/config.yaml:ro
       # SQLite 状态库：Devin 账号凭据、下游令牌、请求日志、限流闩状态
-      - ./data/devin2api:/app/state
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/devin2api
+        target: /app/state
     networks:
       - manifold-upstream   # 出网连 Devin 上游；sub2api 也在这个网络里访问它
     healthcheck:
@@ -184,8 +192,12 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./brand:/srv/brand:ro             # 品牌静态资源兜底，如 /manifold.svg
-      - ./data/caddy/data:/data           # ACME 证书持久化（不丢就不会每次重启重签 → 触发 LE rate limit）
-      - ./data/caddy/config:/config
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/caddy/data
+        target: /data                     # ACME 证书持久化（不丢就不会每次重启重签 → 触发 LE rate limit）
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/caddy/config
+        target: /config
     networks:
       - manifold-edge
 
@@ -203,7 +215,9 @@ services:
       # 仅本机绑定 —— 远端用 SSH 隧道访问，UI 不需要也不应该公网暴露
       - "127.0.0.1:3001:3001"
     volumes:
-      - ./data/uptime-kuma:/app/data
+      - type: bind
+        source: ${MANIFOLD_DATA_DIR:-./data}/uptime-kuma
+        target: /app/data
     networks:
       # 三个网络都接：data 跨 postgres/redis 探针，upstream 走 Telegram 告警出网，edge 备用
       - manifold-data

@@ -215,9 +215,12 @@ cd deploy && docker compose build devin2api   # 仅在构建机执行；测试�
 
 ```bash
 cd /opt/manifold/deploy
+# 从当前容器取实际数据目录，兼容外置 MANIFOLD_DATA_DIR
+DEVIN_DATA_DIR="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/state"}}{{.Source}}{{end}}{{end}}' manifold-devin2api)"
+test -n "$DEVIN_DATA_DIR" && test -d "$DEVIN_DATA_DIR" || exit 1
 # 先停再备份：进程退出后 db 与 -wal/-shm 是一致的
 docker compose stop devin2api
-cp -a data/devin2api "data/devin2api.bak-$(date +%Y%m%d)"
+cp -a "$DEVIN_DATA_DIR" "${DEVIN_DATA_DIR}.bak-$(date +%Y%m%d)"
 docker compose up -d --no-build --no-deps devin2api
 ```
 
@@ -234,9 +237,11 @@ curl -fsS -H "Authorization: Bearer <下游令牌>" http://127.0.0.1:3033/v1/mod
 ```bash
 git checkout deploy/docker-compose.yml
 cd deploy && docker compose stop devin2api
+DEVIN_DATA_DIR="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/state"}}{{.Source}}{{end}}{{end}}' manifold-devin2api)"
+test -n "$DEVIN_DATA_DIR" && test -d "$DEVIN_DATA_DIR" || exit 1
 # schema 已被新版迁移时旧版可能起不来 —— 换回升级前的状态目录
-mv data/devin2api "data/devin2api.failed-$(date +%Y%m%d)"
-cp -a data/devin2api.bak-YYYYMMDD data/devin2api
+mv "$DEVIN_DATA_DIR" "${DEVIN_DATA_DIR}.failed-$(date +%Y%m%d)"
+cp -a "${DEVIN_DATA_DIR}.bak-YYYYMMDD" "$DEVIN_DATA_DIR"
 docker compose up -d devin2api
 ```
 

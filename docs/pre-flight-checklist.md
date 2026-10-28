@@ -124,7 +124,7 @@ docker ps   # 不报权限错就 OK
 ```bash
 cd ~/manifold
 bash scripts/init.sh
-# ADMIN_EMAIL / ADMIN_PASSWORD 已随机生成到 deploy/.env，不会打印到终端
+# ADMIN_EMAIL / ADMIN_PASSWORD 已随机生成到 deploy/.env，不会出现在终端或 shell history
 # 从这个权限为 600 的文件录入密码管理器
 ```
 
@@ -137,6 +137,10 @@ nano deploy/.env
 至少改这些（其它默认即可）：
 
 ```bash
+# 生产数据放到源码树外；先执行：
+# sudo install -d -m 700 -o "$USER" -g "$USER" /var/lib/manifold
+MANIFOLD_DATA_DIR=/var/lib/manifold
+
 # 生产推荐 CF Full (strict)；若暂时仍用 Flexible，也必须完成 §G 的源站白名单
 DOMAIN=
 # ADMIN_EMAIL / ADMIN_PASSWORD 已由 init.sh 生成，保持原值
@@ -147,7 +151,7 @@ TELEGRAM_BOT_TOKEN=<§F 第 1 步算出的 token，空则不告警>
 TELEGRAM_CHAT_ID=<§F 第 1 步算出的 chat id>
 ```
 
-`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 由 init.sh 自动生成，**不要改成可猜的固定值**。
+`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 由 init.sh 自动生成，**不要改成可猜的固定值，也不要粘贴到聊天或命令行**。需要查看时只在受控终端打开权限为 `600` 的 `deploy/.env`。
 
 ### C.3 启栈
 

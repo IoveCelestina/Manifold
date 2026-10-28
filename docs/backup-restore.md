@@ -12,7 +12,11 @@ DoD：**另一台机器上，能用昨天的备份重建出能用的 sub2api**�
 | `data/devin2api/devin-2api.db` | devin2api 状态库：Devin 账号凭据、下游令牌、请求日志 | 要在面板重新加 Devin 账号、建令牌，再把新令牌填回 sub2api 账号 |
 | `configs/devin2api-config.yaml` | devin2api 配置（含面板密码） | 重跑 `scripts/init.sh` 生成新密码 |
 
-**不备份**：`data/postgres/`（pg_dump 代替）、`data/redis/`（可重建）。
+**不备份**：`${MANIFOLD_DATA_DIR}/postgres/`（pg_dump 代替）、`${MANIFOLD_DATA_DIR}/redis/`（可重建）。归档里的 `data/sub2api/`、`data/devin2api/` 是可移植的内部路径，不等于宿主机目录。
+
+`backup.sh` / `backup.ps1` 按“进程环境变量 → `deploy/.env` → `deploy/data`”解析 `MANIFOLD_DATA_DIR`。相对路径以 `deploy/` 为基准。生产环境应在 `deploy/.env` 中使用源码树外的绝对路径（例如 `/var/lib/manifold`）；Compose、备份、恢复均使用这个目录下的 `sub2api/` 和 `devin2api/`。
+
+已有部署更改数据根目录时，先停止受影响的服务，将旧数据复制到新位置并验证，再重建容器；脚本不会自动搬迁旧数据。尤其是已经设置外置目录、但 devin2api 仍挂载 `deploy/data/devin2api` 的部署，升级前需把该目录迁移到 `${MANIFOLD_DATA_DIR}/devin2api`。保留旧目录作为回退副本，否则直接切换挂载会启动一个没有账号和令牌的新库。
 
 devin2api 的库是 SQLite WAL 模式，运行中直接 `cp` 可能拿到 db 和 `-wal` 不一致的组合。`backup.sh` 用 python3 调 SQLite 在线备份 API 取快照，devin2api 不用停，所以服务器上需要有 `python3`。
 
@@ -139,6 +143,19 @@ rclone lsf b2:manifold-backups/ | sort -r | head
 RCLONE_REMOTE=b2:manifold-backups ./scripts/restore.sh manifold-2026-05-20T03-00-00.tar.gz.gpg
 ```
 
+新机器要恢复到源码树外时，首次执行前显式指定目标目录；恢复脚本会把该绝对路径传给 Compose，不会沿用备份中旧机器的路径：
+
+```bash
+sudo install -d -m 700 -o "$USER" -g "$USER" /var/lib/manifold
+MANIFOLD_DATA_DIR=/var/lib/manifold RCLONE_REMOTE=b2:manifold-backups \
+  ./scripts/restore.sh manifold-2026-05-20T03-00-00.tar.gz.gpg
+```
+
+```powershell
+$env:MANIFOLD_DATA_DIR = 'D:\manifold-data'
+.\scripts\restore.ps1 -BackupPath .\manifold-backup.tar.gz.gpg
+```
+
 `restore.sh` / `restore.ps1` 会：
 1. 拉取 + 解密 + 解包
 2. 还原配置
@@ -154,6 +171,20 @@ RCLONE_REMOTE=b2:manifold-backups ./scripts/restore.sh manifold-2026-05-20T03-00
 ```
 
 会先 `docker compose down -v` 清旧卷再恢复。**之前的数据全没**，慎用。
+
+恢复脚本会先确认归档包含 `.env`、数据库 dump 和清单；停服务失败时不会清理数据。覆盖时只清理目标根目录内的已知服务目录，包含 `devin2api` 及旧 WAL/SHM 文件，再将快照内容直接放回目标目录；不会形成 `devin2api/devin2api`。只存在 Devin 数据、没有 `.env` 或 PostgreSQL 目录时，也必须显式加 `--force` / `-Force`。
+
+## 脚本回归测试
+
+```bash
+python3 scripts/tests/backup-restore.tests.py --backend bash
+```
+
+```powershell
+python scripts/tests/backup-restore.tests.py --backend powershell
+```
+
+测试使用隔离临时目录、真实 SQLite WAL 快照和 tar 归档；Docker 和 GPG 使用本地替身，不会访问容器、服务器或真实密钥。覆盖默认目录、`.env` 相对路径、环境变量覆盖、跨目录恢复、重复覆盖、旧备份兼容和失败时保留原数据。这些测试不替代下面的真实灾备演练。
 
 ## DR 演练（每月一次必做）
 

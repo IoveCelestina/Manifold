@@ -5,7 +5,7 @@
 #
 # 这里不放 Devin 凭据：账号（推荐 cog_ 开头的 platform API key）在面板
 # /web/accounts.html 添加，下游令牌在 /web/tokens.html 创建，都存进
-# data/devin2api/devin-2api.db。令牌仓为空时 /v1 对任何能连上的人开放，
+# ${MANIFOLD_DATA_DIR:-./data}/devin2api/devin-2api.db。令牌仓为空时 /v1 对任何能连上的人开放，
 # 所以首次启动后先建令牌，再接 sub2api。
 
 server:

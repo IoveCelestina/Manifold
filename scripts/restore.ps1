@@ -42,6 +42,7 @@ function Die       { param([string]$Msg) Write-Host "ERROR: $Msg" -ForegroundCol
 
 function Read-DotEnvValue {
     param([string]$Path, [string]$Key)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     foreach ($line in Get-Content -LiteralPath $Path) {
         if ($line -match '^\s*#') { continue }
         if ($line -match "^\s*$([regex]::Escape($Key))\s*=\s*(.*)$") {
@@ -49,6 +50,59 @@ function Read-DotEnvValue {
         }
     }
     return $null
+}
+
+function Resolve-DataRoot {
+    $configured = $env:MANIFOLD_DATA_DIR
+    if (-not $configured) {
+        $configured = Read-DotEnvValue (Join-Path $DeployDir '.env') 'MANIFOLD_DATA_DIR'
+    }
+    if (-not $configured) { $configured = './data' }
+
+    if ([System.IO.Path]::IsPathRooted($configured)) {
+        return [System.IO.Path]::GetFullPath($configured)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $DeployDir $configured))
+}
+
+function Set-DotEnvValue {
+    param([string]$Path, [string]$Key, [string]$Value)
+    $found = $false
+    $output = foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -match "^$([regex]::Escape($Key))=") {
+            if (-not $found) {
+                $found = $true
+                "$Key=$Value"
+            }
+        } else {
+            $line
+        }
+    }
+    if (-not $found) { $output += "$Key=$Value" }
+    Set-Content -LiteralPath $Path -Value $output -Encoding utf8NoBOM
+}
+
+function Protect-SecretFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($IsWindows) {
+        # Persist only the DACL; rewriting audit/owner sections can require
+        # SeSecurityPrivilege even when the current user owns this file.
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $accessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $currentUser,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($accessRule)
+        [System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($Path), $acl)
+        return
+    }
+
+    & chmod 600 $Path
+    if ($LASTEXITCODE -ne 0) { Die "无法将 $Path 的权限设置为 600" }
 }
 
 # stdin 从文件流到 docker exec —— 二进制安全
@@ -76,6 +130,27 @@ function Invoke-NativeFromFile {
     if ($stderr) { $stderr -split "`n" | ForEach-Object { if ($_) { Write-Host "  $_" } } }
     if ($proc.ExitCode -ne 0) { Die "$Exe 退出码 $($proc.ExitCode)" }
 }
+
+$dataRoot = Resolve-DataRoot
+$normalizedDataRoot = $dataRoot.TrimEnd([char[]]@('/', '\'))
+$unsafeDataRoots = @(
+    [System.IO.Path]::GetPathRoot($dataRoot),
+    [System.IO.Path]::GetFullPath($RootDir),
+    [System.IO.Path]::GetFullPath($DeployDir),
+    [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('UserProfile'))
+)
+if ($unsafeDataRoots.Where({
+    [string]::Equals(
+        $normalizedDataRoot,
+        $_.TrimEnd([char[]]@('/', '\')),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+})) {
+    Die "拒绝使用不安全的 MANIFOLD_DATA_DIR: $dataRoot"
+}
+# Ensure Compose uses the same destination even when the archive's .env came
+# from a machine with a different absolute data path.
+$env:MANIFOLD_DATA_DIR = $dataRoot
 
 # ─── 1. 准备备份文件 ──────────────────────────────────────────────────
 $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("manifold-restore-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
@@ -105,17 +180,17 @@ try {
     }
     if (-not (Test-Path $ComposeFile)) { Die "找不到 $ComposeFile" }
 
+    $dataSubdirs = @('postgres', 'redis', 'sub2api', 'caddy', 'uptime-kuma', 'devin2api')
     $hasData = $false
     if (Test-Path (Join-Path $DeployDir '.env')) { $hasData = $true }
-    $pgDataDir = Join-Path $DeployDir 'data\postgres'
-    if ((Test-Path $pgDataDir) -and (Get-ChildItem -LiteralPath $pgDataDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-        $hasData = $true
+    foreach ($dataSubdir in $dataSubdirs) {
+        if (Test-Path -LiteralPath (Join-Path $dataRoot $dataSubdir)) { $hasData = $true }
     }
 
     if ($hasData -and -not $Force) {
         Write-Host ""
         Write-Host "检测到现有数据：" -ForegroundColor Yellow
-        Write-Host "  $DeployDir\.env (或) $DeployDir\data\postgres\ 非空"
+        Write-Host "  $DeployDir\.env (或) $dataRoot 下已有 Manifold 服务目录"
         Write-Host ""
         Write-Host "restore.ps1 默认只在全新环境上运行。若确定要覆盖："
         Write-Host "  .\scripts\restore.ps1 -BackupPath '$BackupPath' -Force -Yes"
@@ -141,6 +216,7 @@ try {
 
     if (-not (Test-Path (Join-Path $stageDir 'MANIFEST.txt')))  { Die "备份缺 MANIFEST.txt，可能损坏" }
     if (-not (Test-Path (Join-Path $stageDir 'postgres.dump'))) { Die "备份缺 postgres.dump" }
+    if (-not (Test-Path -LiteralPath (Join-Path $stageDir 'configs\.env') -PathType Leaf)) { Die "备份缺 configs/.env" }
     Write-Log "MANIFEST:"
     Get-Content -LiteralPath (Join-Path $stageDir 'MANIFEST.txt') | ForEach-Object { Write-Host "  $_" }
 
@@ -149,19 +225,30 @@ try {
         Write-Log "停现有 compose 栈 (down -v 清旧卷)..."
         Push-Location $DeployDir
         try { & docker compose down -v } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { Die "docker compose down 失败，未清理现有数据" }
 
-        Remove-Item -LiteralPath (Join-Path $DeployDir 'data')       -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $DeployDir '.env')                 -Force -ErrorAction SilentlyContinue
+        foreach ($dataSubdir in $dataSubdirs) {
+            $dataPath = [System.IO.Path]::GetFullPath((Join-Path $dataRoot $dataSubdir))
+            if ([System.IO.Path]::GetDirectoryName($dataPath) -ne $normalizedDataRoot) {
+                Die "服务目录不在 MANIFOLD_DATA_DIR 内: $dataPath"
+            }
+            if (Test-Path -LiteralPath $dataPath) { Remove-Item -LiteralPath $dataPath -Recurse -Force }
+        }
+        Remove-Item -LiteralPath (Join-Path $DeployDir '.env') -Force -ErrorAction SilentlyContinue
     }
 
     # ─── 5. 还原配置 ─────────────────────────────────────────────────
     Write-Log "还原配置文件..."
-    Copy-Item -LiteralPath (Join-Path $stageDir 'configs\.env') -Destination (Join-Path $DeployDir '.env')
+    $restoredEnv = Join-Path $DeployDir '.env'
+    Copy-Item -LiteralPath (Join-Path $stageDir 'configs\.env') -Destination $restoredEnv
+    Protect-SecretFile -Path $restoredEnv
+    Set-DotEnvValue -Path $restoredEnv -Key 'MANIFOLD_DATA_DIR' -Value $dataRoot
+    Protect-SecretFile -Path $restoredEnv
 
     $stageSub2api = Join-Path $stageDir 'data\sub2api'
     if (Test-Path $stageSub2api) {
-        New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
-        Copy-Item -LiteralPath $stageSub2api -Destination (Join-Path $DeployDir 'data\sub2api') -Recurse
+        New-Item -ItemType Directory -Path $dataRoot -Force | Out-Null
+        Copy-Item -LiteralPath $stageSub2api -Destination (Join-Path $dataRoot 'sub2api') -Recurse
     }
 
     # devin2api：快照是单个自洽的 db 文件（无 -wal/-shm），直接放回状态目录
@@ -172,8 +259,9 @@ try {
     }
     $stageDevin = Join-Path $stageDir 'data\devin2api'
     if (Test-Path $stageDevin) {
-        New-Item -ItemType Directory -Path (Join-Path $DeployDir 'data') -Force | Out-Null
-        Copy-Item -LiteralPath $stageDevin -Destination (Join-Path $DeployDir 'data\devin2api') -Recurse
+        $devinDataDir = Join-Path $dataRoot 'devin2api'
+        New-Item -ItemType Directory -Path $devinDataDir -Force | Out-Null
+        Get-ChildItem -LiteralPath $stageDevin -Force | Copy-Item -Destination $devinDataDir -Recurse -Force
     }
     # ─── 6. 起 postgres + pg_restore ─────────────────────────────────
     Write-Log "拉起 postgres..."

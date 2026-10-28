@@ -17,6 +17,21 @@ on:
 
 jobs:
 
+  backup-restore-tests:
+    name: backup and restore (${{ matrix.backend }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            backend: bash
+          - os: windows-latest
+            backend: powershell
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 隔离目录备份恢复回归（模拟 Docker/GPG，不访问生产）
+        run: python scripts/tests/backup-restore.tests.py --backend ${{ matrix.backend }}
+
   domain-update-tests:
     name: domain update scripts
     runs-on: ubuntu-latest

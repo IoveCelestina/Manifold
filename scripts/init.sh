@@ -104,7 +104,7 @@ fi
 [[ -f "$ENV_TARGET" ]] && chmod 600 "$ENV_TARGET"
 
 # ─── deploy/devin2api/config.yaml ──────────────────────────
-# 只含面板密码；Devin 凭据和下游令牌在 devin2api 面板里管理，存在 data/devin2api。
+# 只含面板密码；Devin 凭据和下游令牌在面板里管理，存在 MANIFOLD_DATA_DIR/devin2api。
 DEVIN_TARGET="$DEPLOY_DIR/devin2api/config.yaml"
 DEVIN_TEMPLATE="$DEPLOY_DIR/devin2api/config.example.yaml"
 [[ -f "$DEVIN_TEMPLATE" ]] || { echo "找不到 $DEVIN_TEMPLATE" >&2; exit 1; }

@@ -4,7 +4,7 @@
 # 备份内容：
 #   - postgres 全库 dump (custom format, 已压缩)
 #   - deploy/.env (含 JWT / TOTP 加密 key，丢了所有用户登录态失效)
-#   - deploy/data/sub2api/ (sub2api 自带数据目录)
+#   - MANIFOLD_DATA_DIR/sub2api/ (sub2api 自带数据目录)
 #   - devin2api 状态库 devin-2api.db（Devin 账号凭据、下游令牌）+ deploy/devin2api/config.yaml
 #
 # 不备份：
@@ -59,6 +59,18 @@ read_env_value() {
   awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/,""); gsub(/^["'\'']|["'\'']$/,""); print; exit }' "$file"
 }
 
+resolve_data_root() {
+  local configured="${MANIFOLD_DATA_DIR:-}"
+  [[ -n "$configured" ]] || configured="$(read_env_value MANIFOLD_DATA_DIR)"
+  configured="${configured:-./data}"
+
+  if [[ "$configured" == /* ]]; then
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' "${DEPLOY_DIR}/${configured#./}"
+  fi
+}
+
 # ─── 1. 前置检查 ──────────────────────────────────────────────────────
 log "前置检查..."
 command -v docker >/dev/null || die "需要 docker"
@@ -73,7 +85,8 @@ if [[ -n "$RCLONE_REMOTE" ]]; then
   command -v rclone >/dev/null || die "RCLONE_REMOTE 已设置但找不到 rclone"
 fi
 
-DEVIN_DB="${DEPLOY_DIR}/data/devin2api/devin-2api.db"
+DATA_ROOT="$(resolve_data_root)"
+DEVIN_DB="${DATA_ROOT}/devin2api/devin-2api.db"
 if [[ -f "$DEVIN_DB" ]]; then
   command -v python3 >/dev/null || die "备份 devin2api 需要 python3（用 SQLite 在线备份 API 取一致快照）"
 fi
@@ -112,9 +125,9 @@ mkdir -p "${STAGE_DIR}/configs"
 cp "${DEPLOY_DIR}/.env" "${STAGE_DIR}/configs/.env"
 
 # sub2api 自带数据目录
-if [[ -d "${DEPLOY_DIR}/data/sub2api" ]]; then
+if [[ -d "${DATA_ROOT}/sub2api" ]]; then
   mkdir -p "${STAGE_DIR}/data"
-  cp -r "${DEPLOY_DIR}/data/sub2api" "${STAGE_DIR}/data/sub2api"
+  cp -r "${DATA_ROOT}/sub2api" "${STAGE_DIR}/data/sub2api"
 fi
 
 # devin2api：SQLite WAL 库在运行中直接 cp 可能拿到不一致的 db/-wal 组合，
@@ -142,6 +155,7 @@ hostname:   $(hostname)
 postgres_container: ${POSTGRES_CONTAINER}
 postgres_user:      ${POSTGRES_USER}
 postgres_db:        ${POSTGRES_DB}
+data_root:          ${DATA_ROOT}
 git_commit:         $(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
 EOF
 

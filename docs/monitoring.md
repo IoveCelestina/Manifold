@@ -8,7 +8,7 @@ DoD：**故意 stop 一个容器，5 分钟内 Telegram 收到告警**。
 |---|---|---|
 | 探针 + UI | Uptime Kuma | `manifold-kuma`，绑 `127.0.0.1:3001` |
 | 通知 | Telegram bot + 邮箱 SMTP | Kuma 内置 |
-| 存储 | SQLite | `deploy/data/uptime-kuma/kuma.db` |
+| 存储 | SQLite | `${MANIFOLD_DATA_DIR}/uptime-kuma/kuma.db` |
 
 为什么不让 Kuma 走公网：监控面板自带的用户列表 / 故障历史是攻击者的好饵 —— 看见你 503 就来撞门。**只开 SSH 隧道**。
 
@@ -91,13 +91,15 @@ Settings → Notifications → SMTP
 
 ## 备份 Kuma 配置
 
-Kuma 配置存在 `deploy/data/uptime-kuma/kuma.db`（SQLite）。`scripts/backup.sh` 当前**没**把它包进去 —— 因为重新配也就 10 分钟。
+Kuma 配置存在 `${MANIFOLD_DATA_DIR}/uptime-kuma/kuma.db`（SQLite；默认目录是 `deploy/data`）。`scripts/backup.sh` 当前**没**把它包进去 —— 因为重新配也就 10 分钟。
 
 如果探针很多想留：
 
 ```bash
 docker exec manifold-kuma sqlite3 /app/data/kuma.db ".backup /app/data/kuma.db.bak"
-cp deploy/data/uptime-kuma/kuma.db.bak deploy/data/uptime-kuma-config-$(date +%Y%m%d).db
+MANIFOLD_DATA_DIR=/var/lib/manifold  # 与 deploy/.env 保持一致
+cp "$MANIFOLD_DATA_DIR/uptime-kuma/kuma.db.bak" \
+  "$MANIFOLD_DATA_DIR/uptime-kuma-config-$(date +%Y%m%d).db"
 ```
 
 塞到 scripts/backup.sh 的 stage 里也行，目前留着不做。

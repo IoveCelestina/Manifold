@@ -378,4 +378,4 @@ curl -fsS -H "Authorization: Bearer <下游令牌>" http://127.0.0.1:3033/v1/mod
 
 **回滚**：
 - sub2api 后台停用该账号，流量立即不再进 devin2api
-- `cd deploy && docker compose stop devin2api`。`data/devin2api` 保留，重新启动后账号和令牌都还在
+- `cd deploy && docker compose stop devin2api`。`${MANIFOLD_DATA_DIR:-./data}/devin2api` 保留，重新启动后账号和令牌都还在
