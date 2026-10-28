@@ -109,7 +109,8 @@ function Protect-SecretFile {
 function Invoke-NativeFromFile {
     param([string]$Exe, [string[]]$Arguments, [string]$InFile)
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $Exe
+    # Use the same executable as the preceding PowerShell Docker checks.
+    $psi.FileName = (Get-Command $Exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
     $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true

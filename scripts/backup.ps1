@@ -71,7 +71,9 @@ function Resolve-DataRoot {
 function Invoke-NativeToFile {
     param([string]$Exe, [string[]]$Arguments, [string]$OutFile)
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $Exe
+    # Match PowerShell's PATH resolution instead of Windows' native search
+    # order, which can prefer a different executable in System32 or the CWD.
+    $psi.FileName = (Get-Command $Exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true

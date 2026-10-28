@@ -32,6 +32,9 @@ using System.Reflection;
 class FixtureTool {
     static int Main(string[] args) {
         string tool = Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location);
+        if (tool == "docker" && !String.Equals(
+            Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+            Environment.GetEnvironmentVariable("TEST_DOCKER_BIN"), StringComparison.OrdinalIgnoreCase)) return 95;
         if (tool == "gpg") {
             int output = Array.IndexOf(args, "--output");
             if (output < 0) return 90;
@@ -127,6 +130,11 @@ class BackupRestoreTests(unittest.TestCase):
         self.env["BACKUP_DIR"] = str(self.root / "backups")
         self.env["TEST_DOCKER_LOG"] = str(self.root / "docker.log")
         self.env["TEST_RESTORED_DUMP"] = str(self.root / "restored.dump")
+        self.env["TEST_DOCKER_BIN"] = str(self.bin)
+        if os.name == "nt":
+            # Native CreateProcess prefers the CWD to PATH. This decoy fails
+            # if a stream helper bypasses PowerShell's executable resolution.
+            shutil.copyfile(self.bin / "docker.exe", self.root / "docker.exe")
 
     def tearDown(self):
         # Cleanup is restricted to the absolute temporary directory we created.
