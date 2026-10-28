@@ -1,3 +1,4 @@
-# Only the source patch enters the build context; config.yaml contains secrets.
+# Only source patches enter the build context; config.yaml contains secrets.
 *
 !reasoning-effort.patch
+!schedule-wakeup.patch

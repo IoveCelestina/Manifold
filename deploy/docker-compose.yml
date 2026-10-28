@@ -139,7 +139,7 @@ services:
     build:
       context: ./devin2api
     # devin2api 0.18.0 + Manifold reasoning effort routing
-    image: manifold/devin2api:0.18.0-effort.1
+    image: manifold/devin2api:0.18.0-effort.2
     container_name: manifold-devin2api
     restart: unless-stopped
     # 收到 SIGTERM 后进程最多排空 600s 让在途流跑完；不放宽的话 docker 10s 就强杀。

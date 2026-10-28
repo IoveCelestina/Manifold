@@ -191,9 +191,11 @@ docker compose up -d kuma
 
 **影响范围**：经 devin2api 的 sub2api 分组短暂不可用。停止时进程最多排空 600s 等在途流跑完（compose 给了 660s 宽限），之后重启约数秒。容器里面板的「一键更新」不可用（返回 501），只能换镜像。
 
-**镜像结构**：`deploy/devin2api/Dockerfile` 固定上游 v0.18.0 源码提交与归档校验和，应用 `reasoning-effort.patch` 并测试、构建，再把可执行文件放进固定 digest 的官方运行时镜像。compose 使用 `manifold/devin2api:0.18.0-effort.1`。升级上游时需要重新验证补丁和测试；直接切回官方镜像会失去[客户端思考强度映射](devin2api-reasoning.md)。
+**镜像结构**：`deploy/devin2api/Dockerfile` 固定上游 v0.18.0 源码提交与归档校验和，应用 `reasoning-effort.patch`、`schedule-wakeup.patch` 并测试、构建，再把可执行文件放进固定 digest 的官方运行时镜像。compose 使用 `manifold/devin2api:0.18.0-effort.2`。CI 的 `devin2api build and tests` 会导出已测试镜像及校验和，可直接加载到服务器，避免在小内存服务器编译。升级上游时需要重新验证两个补丁和完整 Claude Code 工具调用；直接切回官方镜像会失去[客户端思考强度映射及工具兼容修复](devin2api-reasoning.md)。
 
 **构建位置**：源码编译在本机或内存充足的构建机完成，不要在 4 GB 生产服务器上执行 `docker compose build devin2api`。可将构建好的镜像通过 `docker save` / `docker load` 传到生产机，或按[预编译二进制打包说明](devin2api-reasoning.md#构建与回滚)仅在生产机打包镜像。
+
+**配置验收**：检查 `/healthz` 的 `config_last_good`。若为 `true`，服务正在使用历史有效配置兜底，HTTP 200 并不代表磁盘配置正确。先备份当前配置和状态库，再用隔离端口、独立状态快照验证修正后的配置；切换后必须确认 `config_last_good=false`。不要把有语法错误的配置直接带入新实例。
 
 **准备**：
 - 读 [release notes](https://github.com/WncFht/devin2api/releases)。新版启动时会对 `devin-2api.db` 跑 schema 迁移，旧版不一定能读迁移后的库。
@@ -206,7 +208,7 @@ docker compose up -d kuma
 
 ```bash
 $EDITOR deploy/devin2api/Dockerfile   # 更新源码提交、归档校验和、镜像 digest 和构建版本
-# 同步适配 reasoning-effort.patch；构建会运行协议和模型路由测试
+# 同步适配两个源码补丁；构建会运行协议、模型路由和工具回归测试
 $EDITOR deploy/docker-compose.yml     # devin2api 的 image tag 和注释改成新版本
 cd deploy && docker compose build devin2api   # 仅在构建机执行；测试和 -version 校验通过后传输镜像
 ```

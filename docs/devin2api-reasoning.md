@@ -1,6 +1,6 @@
 # devin2api 客户端思考强度
 
-Manifold 的 `0.18.0-effort.1` 镜像在上游 v0.18.0 上增加按请求选择模型档位的能力。客户端保留固定模型名，通过参数切换强度。
+Manifold 的 `0.18.0-effort.2` 镜像在上游 v0.18.0 上增加按请求选择模型档位的能力，并兼容 Claude Code 的完整工具定义。客户端保留固定模型名，通过参数切换强度。
 
 | 请求协议 | 参数 | 示例 |
 | --- | --- | --- |
@@ -26,11 +26,19 @@ sub2api 仍使用原版 0.2.18。其 Anthropic 分组在转换 OpenAI 请求时�
 
 ## 构建与回滚
 
+### Claude Code 工具兼容
+
+`schedule-wakeup.patch` 移除上游适配器从字段说明自动推导 `anyOf` 的逻辑。Claude Code 2.1.293 的 `ScheduleWakeup` 在字段说明中写有 `Required unless stop is true`；旧转换器据此额外合成顶层条件约束，导致 Devin 拒绝整个请求，即使用户只发送 `hello`。修复保留客户端原本的属性、类型和显式约束，条件必填说明继续出现在工具参数说明中，工具调用仍交给 Claude Code 校验和执行。不会禁用、改名或删掉 `ScheduleWakeup`，调度和停止两种调用都保留。
+
+回归测试使用上游固定版本中的完整 Claude Code 工具集，检查工具不会丢失、`ScheduleWakeup` 的参数结构保持原样、条件说明仍在，并覆盖显式 `required`、`anyOf`、`oneOf` 与转换缓存。验收必须运行真实 Claude Code 且不使用 `--disallowedTools ScheduleWakeup`：除普通对话外，还要验证实际调度、取消和工具结果回传，不能以手写的简化 Messages 请求代替完整客户端验收。
+
+### 可复现构建
+
 源码构建请在本机或内存充足的构建机完成，**不要在 4 GB 的生产服务器上编译**：SQLite 依赖的 Go 编译器可能占用数 GB 内存，限制 Go 并发或软堆上限不足以保证生产服务不受影响。
 
-`deploy/devin2api/Dockerfile` 固定上游提交 `989c80ce6dc9ffb46b23d7eac98c34fc98f3a2eb`、源码归档 SHA-256、Go 1.27.3 构建镜像和原运行时镜像。构建时应用 `reasoning-effort.patch`，运行相关 Go 测试，再替换运行时中的可执行文件。`.dockerignore` 仅允许补丁进入上下文，不包含配置和凭据。
+`deploy/devin2api/Dockerfile` 固定上游提交 `989c80ce6dc9ffb46b23d7eac98c34fc98f3a2eb`、源码归档 SHA-256、Go 1.27.3 构建镜像和原运行时镜像。构建时依次应用 `reasoning-effort.patch` 和 `schedule-wakeup.patch`，运行相关 Go 测试，再替换运行时中的可执行文件。`.dockerignore` 仅允许这两个补丁进入上下文，不包含配置和凭据。CI 构建并测试相同 Dockerfile，导出带 SHA-256 校验文件的 `devin2api-linux-amd64-image` 镜像产物；部署时校验镜像的提交标识与通过 CI 的提交一致。
 
-小内存服务器可用 `Dockerfile.prebuilt` 打包在构建机上测试过的 Linux 二进制：用 Go 1.27.3、`CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 和主 Dockerfile 中相同的版本参数编译，计算 SHA-256，将二进制和 `Dockerfile.prebuilt`（改名为 `Dockerfile`）放入单独的临时构建目录，再执行 `docker build --build-arg BINARY_SHA256=<计算出的哈希> -t manifold/devin2api:0.18.0-effort.1 <临时目录>`。该路径只打包和校验文件，不在生产机器运行 Go 编译器。部署前应记录上游提交、补丁哈希、二进制哈希和测试结果。
+小内存服务器可用 `Dockerfile.prebuilt` 打包在构建机上测试过的 Linux 二进制：用 Go 1.27.3、`CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 和主 Dockerfile 中相同的版本参数编译，计算 SHA-256，将二进制和 `Dockerfile.prebuilt`（改名为 `Dockerfile`）放入单独的临时构建目录，再执行 `docker build --build-arg BINARY_SHA256=<计算出的哈希> -t manifold/devin2api:0.18.0-effort.2 <临时目录>`。该路径只打包和校验文件，不在生产机器运行 Go 编译器。部署前应记录上游提交、补丁哈希、二进制哈希和测试结果。
 
 升级先构建镜像并保留旧镜像，备份配置和 SQLite 一致性快照，再只重建 devin2api 服务。遵守现有 660 秒停止宽限，不强杀在途请求。该增量没有数据库迁移；回滚时恢复原 compose 镜像标记与构建文件，并仅重建 devin2api。详细步骤见 [升级说明](upgrade.md#devin2api-升级)。
 
